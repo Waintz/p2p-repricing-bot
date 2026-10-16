@@ -48,7 +48,7 @@ function normalizeNick(nick: string): string {
 
 export function calculateNewPrice(
   orderBook: MarketOrder[],
-  rule: RuleConfig
+  rule: RuleConfig,
 ): CalculationResult {
   const activeCompetitorsMap = new Map<
     string,
@@ -57,10 +57,7 @@ export function calculateNewPrice(
 
   for (const competitor of rule.competitors) {
     if (competitor.isEnabled) {
-      activeCompetitorsMap.set(
-        normalizeNick(competitor.nickname),
-        competitor
-      );
+      activeCompetitorsMap.set(normalizeNick(competitor.nickname), competitor);
     }
   }
 
@@ -93,6 +90,7 @@ export function calculateNewPrice(
 
     matchedByNick++;
 
+    // Проверяем фильтр по времени оплаты
     if (
       rule.allowedPayTimes.length > 0 &&
       !rule.allowedPayTimes.includes(order.payTime)
@@ -100,7 +98,12 @@ export function calculateNewPrice(
       continue;
     }
 
-    if (order.price < rule.minPrice || order.price > rule.maxPrice) {
+    // Если ордер выходит за рамки коридора — просто пропускаем ЭТО конкретное объявление
+    // (не блокируя остальные объявления этого же конкурента!)
+    if (rule.side === "BUY" && order.price > rule.maxPrice) {
+      continue;
+    }
+    if (rule.side === "SELL" && order.price < rule.minPrice) {
       continue;
     }
 
@@ -112,12 +115,20 @@ export function calculateNewPrice(
     let target =
       rule.side === "BUY" ? order.price + stepUsed : order.price - stepUsed;
 
-    if (rule.side === "BUY" && target >= rule.maxPrice) {
-      target = rule.minPrice;
-    } else if (rule.side === "SELL" && target <= rule.minPrice) {
-      target = rule.maxPrice;
+    target = roundPrice(target);
+
+    if (rule.side === "BUY") {
+      if (target > rule.maxPrice) {
+        target = rule.minPrice;
+      } else if (target < rule.minPrice) {
+        target = rule.minPrice;
+      }
     } else {
-      target = Math.min(rule.maxPrice, Math.max(rule.minPrice, target));
+      if (target < rule.minPrice) {
+        target = rule.maxPrice;
+      } else if (target > rule.maxPrice) {
+        target = rule.maxPrice;
+      }
     }
 
     validCompetitorOrders.push({
@@ -138,8 +149,8 @@ export function calculateNewPrice(
     const fallbackPrice = shouldHoldPrice
       ? Math.min(rule.maxPrice, Math.max(rule.minPrice, rule.currentPrice!))
       : rule.side === "SELL"
-      ? rule.maxPrice
-      : rule.minPrice;
+        ? rule.maxPrice
+        : rule.minPrice;
 
     const reason =
       matchedByNick === 0

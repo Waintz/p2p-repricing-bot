@@ -13,9 +13,25 @@ export interface BybitMyAd {
   status: number;
 }
 
+interface BybitStopCondition {
+  ourSide: "BUY" | "SELL";
+  nicks?: Set<string>;
+  minPrice?: number;
+  maxPrice?: number;
+}
+
+function normalizeNick(nick: string): string {
+  return String(nick ?? "")
+    .normalize("NFKC")
+    .replace(/[\u200B-\u200D\uFEFF\u00A0]/g, "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .toLowerCase();
+}
+
 export const BYBIT_PAYMENT_MAP: Record<string, string[]> = {
-  MONOBANK_CARD: ["43"],
-  MONOBANK_IBAN: ["659"],
+  MONOBANK_CARD: ["43", "659"],
+  MONOBANK_IBAN: ["659", "43"],
   PRIVAT_CARD: ["60"],
   PRIVAT_IBAN: ["60"],
   ABANK_CARD: ["1"],
@@ -36,10 +52,10 @@ export class BybitAdapter implements IExchangeAdapter {
     "https://api.bybit.com/fiat/otc/item/online";
   private readonly PRIVATE_API_URL = "https://api.bybit.com";
 
+  private readonly MAX_SCAN_PAGES = 8;
+
   private timeOffset: number = 0;
   private lastTimeSync: number = 0;
-
-  // Хранилище истории запросов для соблюдения рейт-лимитов Bybit
   private updateHistory: Map<string, number[]> = new Map();
 
   private async getSyncedTimestamp(): Promise<string> {
@@ -62,20 +78,21 @@ export class BybitAdapter implements IExchangeAdapter {
     return (Date.now() + this.timeOffset).toString();
   }
 
-  public async fetchOrderBook(
-    params: FetchOrderBookParams,
-  ): Promise<MarketOrder[]> {
-    const paymentIds = BYBIT_PAYMENT_MAP[params.paymentMethod] || [];
-    const bybitSide = params.side === "SELL" ? "1" : "0";
-
+  private async fetchPageStrict(
+    asset: string,
+    fiat: string,
+    bybitSide: string,
+    page: number,
+    paymentIds: string[]
+  ): Promise<any[] | null> {
     const payload = {
       userId: "",
-      tokenId: params.asset,
-      currencyId: params.fiat,
-      payment: paymentIds.length > 0 ? paymentIds : [],
+      tokenId: asset,
+      currencyId: fiat,
+      payment: paymentIds,
       side: bybitSide,
-      size: "50",
-      page: "1",
+      size: "30",
+      page: String(page),
       amount: "",
       authMaker: false,
       canTrade: false,
@@ -88,30 +105,106 @@ export class BybitAdapter implements IExchangeAdapter {
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
     };
 
-    let items: any[] = [];
-
     try {
       const response = await axios.post(this.PRIMARY_P2P_URL, payload, {
         headers,
-        timeout: 12000,
+        timeout: 9000,
       });
-      items = response.data?.result?.items || [];
+      return response.data?.result?.items || [];
     } catch {
       try {
         const responseBackup = await axios.post(this.BACKUP_P2P_URL, payload, {
           headers,
-          timeout: 12000,
+          timeout: 9000,
         });
-        items = responseBackup.data?.result?.items || [];
+        return responseBackup.data?.result?.items || [];
       } catch (err: any) {
-        console.warn(
-          `⚠️ [Bybit] Задержка сети при запросе стакана: ${err.message}`,
-        );
-        return [];
+        console.warn(`⚠️ [Bybit] Ошибка стакана (стр. ${page}): ${err.message}`);
+        return null;
       }
     }
+  }
 
-    return items.map((item: any) => {
+  public async fetchOrderBook(
+    params: FetchOrderBookParams,
+  ): Promise<MarketOrder[]> {
+    const extra = params as FetchOrderBookParams & {
+      competitorNicks?: string[];
+      minPrice?: number;
+      maxPrice?: number;
+    };
+
+    const paymentIds = BYBIT_PAYMENT_MAP[params.paymentMethod] || [];
+    const bybitSide = params.side === "SELL" ? "1" : "0";
+
+    const targetNicks = extra.competitorNicks?.length
+      ? new Set(extra.competitorNicks.map(normalizeNick))
+      : undefined;
+
+    const stop: BybitStopCondition = {
+      ourSide: params.side,
+      nicks: targetNicks,
+      minPrice: extra.minPrice,
+      maxPrice: extra.maxPrice,
+    };
+
+    const isTargetCompetitorInCorridor = (item: any): boolean => {
+      const nick = normalizeNick(item?.nickName);
+      const price = parseFloat(item?.price || "0");
+
+      if (stop.nicks && !stop.nicks.has(nick)) return false;
+      if (stop.minPrice !== undefined && price < stop.minPrice) return false;
+      if (stop.maxPrice !== undefined && price > stop.maxPrice) return false;
+      return true;
+    };
+
+    let allRawItems: any[] = [];
+    const seenOrderIds = new Set<string>();
+
+    // Постраничное сканирование с автоматической остановкой при нахождении нужного конкурента в коридоре
+    for (let page = 1; page <= this.MAX_SCAN_PAGES; page++) {
+      const items = await this.fetchPageStrict(
+        params.asset,
+        params.fiat,
+        bybitSide,
+        page,
+        paymentIds
+      );
+
+      if (items === null || items.length === 0) break;
+
+      for (const item of items) {
+        const idStr = String(item.id);
+        if (!seenOrderIds.has(idStr)) {
+          seenOrderIds.add(idStr);
+          allRawItems.push(item);
+        }
+      }
+
+      // Если в загруженных объявлениях найден целевой конкурент в рамках коридора цены — прекращаем опрос
+      if (items.some(isTargetCompetitorInCorridor)) {
+        console.log(
+          `⏹️ [Bybit] Целевой конкурент найден в коридоре на стр. ${page}, загружено ${allRawItems.length} объявлений`
+        );
+        break;
+      }
+
+      // Проверка граничной цены последней записи на странице
+      const lastItem = items[items.length - 1];
+      const lastPrice = parseFloat(lastItem?.price || "0");
+      if (lastPrice > 0) {
+        if (params.side === "BUY" && stop.minPrice !== undefined && lastPrice < stop.minPrice) {
+          break;
+        }
+        if (params.side === "SELL" && stop.maxPrice !== undefined && lastPrice > stop.maxPrice) {
+          break;
+        }
+      }
+
+      if (items.length < 30) break;
+    }
+
+    const mappedOrders: MarketOrder[] = allRawItems.map((item: any) => {
       const rawPayments: string[] = (item.payments || []).map(String);
       const mappedMethods: string[] = [...rawPayments];
 
@@ -134,6 +227,12 @@ export class BybitAdapter implements IExchangeAdapter {
         paymentMethods: mappedMethods,
       };
     });
+
+    console.log(
+      `📚 [Bybit] Стакан ${params.asset}/${params.fiat} (${params.side} -> side ${bybitSide}, банк: ${params.paymentMethod}): получено ${mappedOrders.length} ордеров`
+    );
+
+    return mappedOrders;
   }
 
   private signRequest(
@@ -150,6 +249,7 @@ export class BybitAdapter implements IExchangeAdapter {
 
   public async fetchMyAds(): Promise<BybitMyAd[]> {
     if (!ENV.BYBIT_API_KEY || !ENV.BYBIT_API_SECRET) {
+      console.warn("⚠️ [Bybit] API ключи не заданы в .env");
       return [];
     }
 
@@ -175,17 +275,21 @@ export class BybitAdapter implements IExchangeAdapter {
       );
 
       const rawItems = response.data?.result?.items || [];
-
-      return rawItems
+      const activeAds = rawItems
         .filter((ad: any) => Number(ad.status) === 10)
         .map((ad: any) => ({
           id: String(ad.id),
-          tokenId: String(ad.tokenId || "USDT"),
-          currencyId: String(ad.currencyId || "UAH"),
+          tokenId: String(ad.tokenId || ad.tokenName || "USDT").trim().toUpperCase(),
+          currencyId: String(ad.currencyId || "UAH").trim().toUpperCase(),
           side: Number(ad.side) === 1 ? "SELL" : "BUY",
           price: String(ad.price || "0"),
           status: 10,
         }));
+
+      console.log(
+        `📋 [Bybit] Загружено личных активных объявлений (Online): ${activeAds.length} из ${rawItems.length}`
+      );
+      return activeAds;
     } catch (err: any) {
       console.warn(`⚠️ [Bybit] Ошибка получения объявлений: ${err.message}`);
       return [];
@@ -240,7 +344,8 @@ export class BybitAdapter implements IExchangeAdapter {
           (item: any) => String(item.id).trim() === String(adId).trim(),
         ) || null
       );
-    } catch {
+    } catch (err: any) {
+      console.warn(`⚠️ [Bybit] getRawAd ошибка для #${adId}: ${err.message}`);
       return null;
     }
   }
@@ -270,9 +375,11 @@ export class BybitAdapter implements IExchangeAdapter {
       return false;
     }
 
-    // Не чаще 1 раза в 25 секунд на одно объявление
     const lastAttempt = timestamps[timestamps.length - 1] || 0;
     if (now - lastAttempt < 25000) {
+      console.log(
+        `⏱️ [Bybit] Пропуск тика для #${adId} (интервал между обновлениями одного ордера < 25с)`,
+      );
       return false;
     }
 
@@ -280,7 +387,7 @@ export class BybitAdapter implements IExchangeAdapter {
       const currentAd = await this.getRawAd(adId);
       if (!currentAd) {
         console.warn(
-          `⚠️ [Bybit] Ордер #${adId} не найден в списке пользователя`,
+          `⚠️ [Bybit] Ордер #${adId} не найден на бирже через getRawAd`,
         );
         return false;
       }
@@ -292,23 +399,53 @@ export class BybitAdapter implements IExchangeAdapter {
       const paymentIds: string[] =
         rawTermsIds.length > 0
           ? rawTermsIds
-          : (currentAd.payments || []).map(String);
+          : (currentAd.payments || [])
+              .map(String)
+              .filter((id: string) => id && id !== "-1");
 
       const timestamp = await this.getSyncedTimestamp();
       const recvWindow = "10000";
 
+      const rawPrefs = currentAd.tradingPreferenceSet || {};
+      const cleanTradingPrefs: Record<string, string> = {};
+
+      const allowedPrefKeys = [
+        "hasUnPostAd",
+        "isKyc",
+        "isEmail",
+        "isMobile",
+        "hasRegisterTime",
+        "registerTimeThreshold",
+        "orderFinishNumberDay30",
+        "completeRateDay30",
+        "nationalLimit",
+        "hasOrderFinishNumberDay30",
+        "hasCompleteRateDay30",
+        "hasNationalLimit",
+      ];
+
+      for (const key of allowedPrefKeys) {
+        if (rawPrefs[key] !== undefined && rawPrefs[key] !== null) {
+          cleanTradingPrefs[key] = String(rawPrefs[key]);
+        }
+      }
+
       const updatePayload: Record<string, any> = {
         id: String(currentAd.id),
-        priceType: Number(currentAd.priceType ?? 0),
-        premium: String(currentAd.premium ?? "0"),
+        actionType: "MODIFY",
+        priceType: String(currentAd.priceType ?? "0"),
+        premium:
+          String(currentAd.priceType) === "1"
+            ? String(currentAd.premium ?? "100")
+            : "",
         price: newPrice.toFixed(2),
         quantity: String(currentAd.lastQuantity ?? currentAd.quantity ?? "100"),
         minAmount: String(currentAd.minAmount ?? "500"),
         maxAmount: String(currentAd.maxAmount ?? "50000"),
-        paymentPeriod: Number(currentAd.paymentPeriod ?? 15),
+        paymentPeriod: String(currentAd.paymentPeriod ?? "15"),
         remark: String(currentAd.remark || ""),
-        paymentIds: paymentIds.slice(0, 5),
-        tradingPreferenceSet: currentAd.tradingPreferenceSet || {},
+        paymentIds: paymentIds.length > 0 ? paymentIds.slice(0, 5) : ["-1"],
+        tradingPreferenceSet: cleanTradingPrefs,
       };
 
       const bodyStr = JSON.stringify(updatePayload);
@@ -337,7 +474,11 @@ export class BybitAdapter implements IExchangeAdapter {
 
       if (!isSuccess) {
         const errMsg = response.data?.ret_msg || "";
-        console.warn(`⚠️ [Bybit API Error]: ${JSON.stringify(response.data)}`);
+        console.warn(
+          `⚠️ [Bybit API Error]: Код ${response.data?.ret_code ?? response.data?.retCode} — ${errMsg}`,
+          JSON.stringify(response.data),
+        );
+        console.warn(`📦 Отправленный payload:`, bodyStr);
 
         const ceilingMatch = errMsg.match(/higher than ([\d.]+)/);
         if (ceilingMatch && ceilingMatch[1]) {
@@ -353,7 +494,7 @@ export class BybitAdapter implements IExchangeAdapter {
       }
 
       console.log(
-        `✅ [Bybit API] Ордер #${adId} успешно выставлен на ${newPrice.toFixed(2)} UAH (использовано ${timestamps.length}/8 лимита)`,
+        `✅ [Bybit API] Ордер #${adId} успешно выставлен на ${newPrice.toFixed(2)} UAH (лимит: ${timestamps.length}/8)`,
       );
       return true;
     } catch (err: any) {

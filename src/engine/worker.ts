@@ -83,8 +83,14 @@ export class RepricingWorker {
     const books = new Map<string, MarketOrder[]>();
 
     for (const rule of rules) {
-      if (!rule.adId) continue;
-      if (adapter.isAdCoolingDown?.(String(rule.adId))) continue;
+      if (!rule.adId) {
+        console.warn(`⚠️ [${rule.exchange}] Правило "${rule.name}" включено, но не привязан ID ордера (adId пустой)`);
+        continue;
+      }
+      if (adapter.isAdCoolingDown?.(String(rule.adId))) {
+        console.log(`⏳ [${rule.exchange}] Ордер #${rule.adId} на кулдауне, пропуск.`);
+        continue;
+      }
 
       try {
         const bookKey = this.bookKeyOf(rule);
@@ -107,7 +113,10 @@ export class RepricingWorker {
           books.set(bookKey, orderBook);
         }
 
-        if (!orderBook || orderBook.length === 0) continue;
+        if (!orderBook || orderBook.length === 0) {
+          console.warn(`⚠️ [${rule.exchange}] Стакан для "${rule.name}" пуст или не загружен`);
+          continue;
+        }
 
         const allowedPayTimes: number[] = JSON.parse(
           rule.allowedPayTimes || "[15,30,45,60]"
@@ -140,6 +149,9 @@ export class RepricingWorker {
           Number.isFinite(currentPrice) &&
           Math.round(currentPrice * 100) === Math.round(safeTargetPrice * 100)
         ) {
+          console.log(
+            `⏸️ [${rule.exchange} | ${rule.name}] Цена актуальна: ${currentPrice.toFixed(2)} UAH (${result.reason})`
+          );
           continue;
         }
 

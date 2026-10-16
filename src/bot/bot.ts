@@ -30,7 +30,7 @@ export const bot = new Bot<BotContext>(ENV.BOT_TOKEN);
 bot.use(
   session({
     initial: (): SessionData => ({}),
-  })
+  }),
 );
 
 bot.use(async (ctx, next) => {
@@ -82,7 +82,7 @@ async function showExchangeAds(ctx: BotContext, exchange: string) {
     const sideText = r.side === "SELL" ? "Продажа" : "Покупка";
     kb.text(
       `${statusIcon} ${r.name} [${r.asset}/${r.fiat} • ${sideText}]`,
-      `rule:${r.id}`
+      `rule:${r.id}`,
     ).row();
   }
 
@@ -97,7 +97,7 @@ async function showExchangeAds(ctx: BotContext, exchange: string) {
 export async function showRuleCard(
   ctx: BotContext,
   ruleId: number,
-  isEdit = true
+  isEdit = true,
 ) {
   ctx.session.awaitingInput = undefined;
   const rule = await prisma.adRule.findUnique({
@@ -138,7 +138,7 @@ export async function showRuleCard(
   const kb = new InlineKeyboard()
     .text(
       rule.isActive ? "🔴 Выключить слежение" : "🟢 Включить слежение",
-      `toggle_active:${rule.id}`
+      `toggle_active:${rule.id}`,
     )
     .row()
     .text(`🪙 Валюта: ${rule.asset}`, `toggle_asset:${rule.id}`)
@@ -150,12 +150,12 @@ export async function showRuleCard(
       rule.matchAllCompetitors
         ? "🎯 Все объявления банка: ВКЛ"
         : "🎯 Все объявления банка: ВЫКЛ",
-      `toggle_all_comp:${rule.id}`
+      `toggle_all_comp:${rule.id}`,
     )
     .row()
     .text(
       `👥 Конкуренты (${activeComps}/${rule.competitors.length})`,
-      `menu_comp:${rule.id}`
+      `menu_comp:${rule.id}`,
     )
     .text(`⏱ Время оплаты`, `menu_time:${rule.id}`)
     .row()
@@ -167,7 +167,10 @@ export async function showRuleCard(
   if (rule.exchange === "BYBIT") {
     kb.text(`📋 Выбрать ордер из Bybit`, `fetch_bybit_ads:${rule.id}`).row();
   } else if (rule.exchange === "BINANCE") {
-    kb.text(`📋 Выбрать ордер из Binance`, `fetch_binance_ads:${rule.id}`).row();
+    kb.text(
+      `📋 Выбрать ордер из Binance`,
+      `fetch_binance_ads:${rule.id}`,
+    ).row();
   }
 
   kb.text(`🆔 Ввести ID вручную`, `ask_input:AD_ID:${rule.id}`)
@@ -194,7 +197,7 @@ bot.callbackQuery(/^fetch_bybit_ads:(\d+)$/, async (ctx) => {
 
   if (ads.length === 0) {
     await ctx.reply(
-      "⚠️ Объявления не найдены или не указаны валидные API-ключи Bybit в .env (нужен доступ P2P/OTC)."
+      "⚠️ Объявления не найдены или не указаны валидные API-ключи Bybit в .env (нужен доступ P2P/OTC).",
     );
     return;
   }
@@ -203,15 +206,15 @@ bot.callbackQuery(/^fetch_bybit_ads:(\d+)$/, async (ctx) => {
   for (const ad of ads) {
     const sideText = ad.side === "SELL" ? "ПРОДАЖА" : "ПОКУПКА";
     kb.text(
-      `#${ad.id.slice(-6)} | ${sideText} | ${ad.price} UAH`,
-      `set_ad_id:${ruleId}:${ad.id}`
+      `#${ad.id.slice(-6)} | ${sideText} | ${ad.tokenId} | ${ad.price} UAH`,
+      `set_ad_id:${ruleId}:${ad.id}`,
     ).row();
   }
   kb.text("⬅️ Назад к карточке", `rule:${ruleId}`);
 
   await ctx.editMessageText(
     "📋 <b>Выберите объявление из вашего аккаунта Bybit:</b>\n\nНажмите на нужный ордер, чтобы привязать его:",
-    { parse_mode: "HTML", reply_markup: kb }
+    { parse_mode: "HTML", reply_markup: kb },
   );
 });
 
@@ -223,7 +226,7 @@ bot.callbackQuery(/^fetch_binance_ads:(\d+)$/, async (ctx) => {
 
   if (ads.length === 0) {
     await ctx.reply(
-      "⚠️ Объявления не найдены или нет прав у API-ключа Binance. Можно ввести ID ордера вручную."
+      "⚠️ Объявления не найдены или нет прав у API-ключа Binance. Можно ввести ID ордера вручную.",
     );
     return;
   }
@@ -232,15 +235,15 @@ bot.callbackQuery(/^fetch_binance_ads:(\d+)$/, async (ctx) => {
   for (const ad of ads) {
     const sideText = ad.tradeType === "SELL" ? "ПРОДАЖА" : "ПОКУПКА";
     kb.text(
-      `#${ad.advNo.slice(-6)} | ${sideText} | ${ad.price} UAH`,
-      `set_ad_id:${ruleId}:${ad.advNo}`
+      `#${ad.advNo.slice(-6)} | ${sideText} | ${ad.asset} | ${ad.price} UAH`,
+      `set_ad_id:${ruleId}:${ad.advNo}`,
     ).row();
   }
   kb.text("⬅️ Назад к карточке", `rule:${ruleId}`);
 
   await ctx.editMessageText(
     "📋 <b>Выберите объявление из Binance:</b>\n\nНажмите на нужный ордер для привязки:",
-    { parse_mode: "HTML", reply_markup: kb }
+    { parse_mode: "HTML", reply_markup: kb },
   );
 });
 
@@ -312,7 +315,7 @@ bot.callbackQuery(/^toggle_active:(\d+)$/, async (ctx) => {
   });
 
   await ctx.answerCallbackQuery(
-    updated.isActive ? "🟢 Слежение запущено!" : "🔴 Слежение остановлено!"
+    updated.isActive ? "🟢 Слежение запущено!" : "🔴 Слежение остановлено!",
   );
   await showRuleCard(ctx, ruleId, true);
 });
@@ -389,7 +392,7 @@ bot.callbackQuery(/^toggle_all_comp:(\d+)$/, async (ctx) => {
   await ctx.answerCallbackQuery(
     !rule.matchAllCompetitors
       ? "✅ Теперь перебиваются все объявления выбранного банка"
-      : "✅ Снова учитываются только выбранные ники"
+      : "✅ Снова учитываются только выбранные ники",
   );
   await showRuleCard(ctx, ruleId, true);
 });
@@ -405,7 +408,7 @@ async function renderTimeMenu(ctx: BotContext, ruleId: number) {
     const isChecked = currentTimes.includes(t);
     kb.text(
       `${isChecked ? "✅" : "❌"} ${t} минут`,
-      `toggle_time:${ruleId}:${t}`
+      `toggle_time:${ruleId}:${t}`,
     ).row();
   }
   kb.text("⬅️ Готово (Назад)", `rule:${ruleId}`);
@@ -413,7 +416,7 @@ async function renderTimeMenu(ctx: BotContext, ruleId: number) {
   await ctx
     .editMessageText(
       "⏱ <b>Лимит времени оплаты конкурентов</b>\n\nОтметьте значения, которые бот должен учитывать:",
-      { parse_mode: "HTML", reply_markup: kb }
+      { parse_mode: "HTML", reply_markup: kb },
     )
     .catch(() => {});
 }
@@ -475,7 +478,7 @@ async function renderCompetitorsMenu(ctx: BotContext, ruleId: number) {
 
   kb.text(
     "➕ Добавить конкурента (ник)",
-    `ask_input:ADD_COMPETITOR:${ruleId}`
+    `ask_input:ADD_COMPETITOR:${ruleId}`,
   ).row();
   kb.text("⬅️ Назад к объявлению", `rule:${ruleId}`);
 
@@ -501,7 +504,7 @@ bot.callbackQuery(/^toggle_comp:(\d+):(\d+)$/, async (ctx) => {
   });
 
   await ctx.answerCallbackQuery(
-    comp.isEnabled ? "Конкурент отключен" : "Конкурент включен"
+    comp.isEnabled ? "Конкурент отключен" : "Конкурент включен",
   );
   await renderCompetitorsMenu(ctx, ruleId);
 });
@@ -536,7 +539,7 @@ bot.callbackQuery(/^ask_comp_step:(\d+):(\d+)$/, async (ctx) => {
   await ctx.editMessageText(
     `📏 Введите персональный шаг перебивания для <b>${comp.nickname}</b> в грн\n` +
       `(например: <code>0.00</code> для следования в цену или <code>0.01</code>):`,
-    { parse_mode: "HTML", reply_markup: kb }
+    { parse_mode: "HTML", reply_markup: kb },
   );
 });
 
@@ -608,7 +611,7 @@ bot.on("message:text", async (ctx) => {
     const val = parseFloat(rawText.replace(",", "."));
     if (isNaN(val) || (type === "STEP" ? val < 0 : val <= 0)) {
       await ctx.reply(
-        "❌ Ошибка! Введите корректное число (например: 0.00, 0.01 или 45.50)."
+        "❌ Ошибка! Введите корректное число (например: 0.00, 0.01 или 45.50).",
       );
       return;
     }
@@ -634,7 +637,7 @@ bot.on("message:text", async (ctx) => {
     const val = parseFloat(rawText.replace(",", "."));
     if (isNaN(val) || val < 0) {
       await ctx.reply(
-        "❌ Ошибка! Введите корректное число >= 0 (например: 0.00 или 0.01)."
+        "❌ Ошибка! Введите корректное число >= 0 (например: 0.00 или 0.01).",
       );
       return;
     }
