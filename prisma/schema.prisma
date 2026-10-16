@@ -1,0 +1,56 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model AdRule {
+  id       Int    @id @default(autoincrement())
+  exchange String // "BYBIT" | "BINANCE" | "OKX"
+  adId     String // ID нашего объявления на бирже (может быть пустым до привязки)
+  name     String // Понятное название в меню (например: "Моно USDT Продажа")
+  asset    String @default("USDT") // "USDT" | "USDC"
+  fiat     String @default("UAH") // "UAH"
+  side     String @default("SELL") // "BUY" (покупка) | "SELL" (продажа)
+
+  // Способ оплаты (например: "MONOBANK_CARD", "MONOBANK_IBAN", "PRIVAT_CARD", "PRIVAT_IBAN")
+  paymentMethod String @default("MONOBANK_CARD")
+
+  // Параметры перебивания цены
+  step     Float @default(0.01) // Шаг изменения цены (0.01, 0.02 и т.д.)
+  minPrice Float @default(45.50) // Минимальная / базовая цена (возврат сюда)
+  maxPrice Float @default(45.80) // Максимальная цена (потолок)
+
+  // Разрешенные лимиты времени оплаты конкурентов в формате JSON-массива, например "[15, 30]"
+  allowedPayTimes String @default("[15,30,45,60]")
+
+  // Если включено, правило перебивает всех конкурентов выбранного банка.
+  // Если выключено, учитываются только явно добавленные ники.
+  matchAllCompetitors Boolean @default(false)
+
+  // Статус и текущее состояние
+  currentPrice Float? // Последняя выставленная ботом цена
+  isActive     Boolean @default(false) // Включено ли слежение прямо сейчас
+
+  competitors Competitor[] // Список конкурентов для этого объявления
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+// Конкурент, привязанный к конкретному нашему объявлению
+model Competitor {
+  id        Int     @id @default(autoincrement())
+  nickname  String // Ник конкурента на бирже (как он отображается в стакане)
+  isEnabled Boolean @default(true) // Можно временно выключать/включать без удаления
+
+  adRuleId Int
+  adRule   AdRule @relation(fields: [adRuleId], references: [id], onDelete: Cascade)
+
+  step Float?
+
+  @@unique([adRuleId, nickname]) // Защита от дублирования одного и того же ника в одном объявлении
+}

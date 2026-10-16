@@ -1,0 +1,32 @@
+services:
+  bot-phone-1:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: p2p_bot_phone_1
+    restart: always
+    env_file:
+      - .env.bot1
+    volumes:
+      - ./data/phone1:/app/data
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  bot-phone-2:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: p2p_bot_phone_2
+    restart: always
+    env_file:
+      - .env.bot2
+    volumes:
+      - ./data/phone2:/app/data
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
