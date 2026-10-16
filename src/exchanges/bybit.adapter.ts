@@ -53,18 +53,17 @@ export class BybitAdapter implements IExchangeAdapter {
           res.data?.timeNano?.slice(0, 13) ||
             res.data?.result?.timeSecond * 1000 ||
             now,
-          10
+          10,
         );
         this.timeOffset = serverTime - now;
         this.lastTimeSync = now;
-      } catch {
-      }
+      } catch {}
     }
     return (Date.now() + this.timeOffset).toString();
   }
 
   public async fetchOrderBook(
-    params: FetchOrderBookParams
+    params: FetchOrderBookParams,
   ): Promise<MarketOrder[]> {
     const paymentIds = BYBIT_PAYMENT_MAP[params.paymentMethod] || [];
     const bybitSide = params.side === "SELL" ? "1" : "0";
@@ -106,7 +105,7 @@ export class BybitAdapter implements IExchangeAdapter {
         items = responseBackup.data?.result?.items || [];
       } catch (err: any) {
         console.warn(
-          `⚠️ [Bybit] Задержка сети при запросе стакана: ${err.message}`
+          `⚠️ [Bybit] Задержка сети при запросе стакана: ${err.message}`,
         );
         return [];
       }
@@ -130,7 +129,7 @@ export class BybitAdapter implements IExchangeAdapter {
         price: parseFloat(item.price),
         payTime: parseInt(
           String(item.paymentPeriod ?? item.payTime ?? "15"),
-          10
+          10,
         ),
         paymentMethods: mappedMethods,
       };
@@ -140,7 +139,7 @@ export class BybitAdapter implements IExchangeAdapter {
   private signRequest(
     timestamp: string,
     recvWindow: string,
-    bodyString: string
+    bodyString: string,
   ): string {
     const prehash = `${timestamp}${ENV.BYBIT_API_KEY}${recvWindow}${bodyString}`;
     return crypto
@@ -157,7 +156,8 @@ export class BybitAdapter implements IExchangeAdapter {
     try {
       const timestamp = await this.getSyncedTimestamp();
       const recvWindow = "10000";
-      const bodyStr = JSON.stringify({ page: "1", size: "50" });
+      // Отправляем пустой объект или валидный size <= 30
+      const bodyStr = JSON.stringify({});
       const signature = this.signRequest(timestamp, recvWindow, bodyStr);
 
       const response = await axios.post(
@@ -172,15 +172,18 @@ export class BybitAdapter implements IExchangeAdapter {
             "X-BAPI-SIGN": signature,
           },
           timeout: 6000,
-        }
+        },
       );
+
+      console.log("Bybit fetchMyAds response:", response.data);
 
       const rawItems = response.data?.result?.items || [];
       return rawItems.map((ad: any) => ({
         id: String(ad.id),
         tokenId: String(ad.tokenId || "USDT"),
         currencyId: String(ad.currencyId || "UAH"),
-        side: ad.side === 1 ? "SELL" : "BUY",
+        // По документу Bybit: 0 - buy, 1 - sell
+        side: Number(ad.side) === 1 ? "SELL" : "BUY",
         price: String(ad.price || "0"),
         status: Number(ad.status || 0),
       }));
@@ -194,7 +197,7 @@ export class BybitAdapter implements IExchangeAdapter {
     try {
       const timestamp = await this.getSyncedTimestamp();
       const recvWindow = "10000";
-      const bodyStr = JSON.stringify({ page: "1", size: "50" });
+      const bodyStr = JSON.stringify({ itemId: String(adId) });
       const signature = this.signRequest(timestamp, recvWindow, bodyStr);
 
       const response = await axios.post(
@@ -209,12 +212,34 @@ export class BybitAdapter implements IExchangeAdapter {
             "X-BAPI-SIGN": signature,
           },
           timeout: 6000,
-        }
+        },
       );
 
       const items = response.data?.result?.items || [];
+      if (items.length > 0) {
+        return items[0];
+      }
+
+      const fallbackRes = await axios.post(
+        `${this.PRIVATE_API_URL}/v5/p2p/item/personal/list`,
+        JSON.stringify({ size: 30 }),
+        {
+          headers: {
+            "Content-Type": "application/json",
+            "X-BAPI-API-KEY": ENV.BYBIT_API_KEY,
+            "X-BAPI-TIMESTAMP": timestamp,
+            "X-BAPI-RECV-WINDOW": recvWindow,
+            "X-BAPI-SIGN": signature,
+          },
+          timeout: 6000,
+        },
+      );
+
+      const fallbackItems = fallbackRes.data?.result?.items || [];
       return (
-        items.find((item: any) => String(item.id).trim() === String(adId).trim()) || null
+        fallbackItems.find(
+          (item: any) => String(item.id).trim() === String(adId).trim(),
+        ) || null
       );
     } catch {
       return null;
@@ -226,7 +251,7 @@ export class BybitAdapter implements IExchangeAdapter {
 
     if (!ENV.BYBIT_API_KEY || !ENV.BYBIT_API_SECRET) {
       console.log(
-        `🧪 [DRY-RUN | Bybit] Симуляция смены цены для ордера #${adId} -> ${newPrice.toFixed(2)} UAH`
+        `🧪 [DRY-RUN | Bybit] Симуляция смены цены для ордера #${adId} -> ${newPrice.toFixed(2)} UAH`,
       );
       return true;
     }
@@ -235,13 +260,13 @@ export class BybitAdapter implements IExchangeAdapter {
     const windowMs = 5 * 60 * 1000;
 
     const timestamps = (this.updateHistory.get(adId) || []).filter(
-      (t) => now - t < windowMs
+      (t) => now - t < windowMs,
     );
 
     if (timestamps.length >= 8) {
       const waitSec = Math.ceil((timestamps[0] + windowMs - now) / 1000);
       console.warn(
-        `⏳ [Bybit Rate-Limit] Пауза для ордера #${adId}. Ждем ${waitSec}с до сброса лимита.`
+        `⏳ [Bybit Rate-Limit] Пауза для ордера #${adId}. Ждем ${waitSec}с до сброса лимита.`,
       );
       return false;
     }
@@ -255,7 +280,9 @@ export class BybitAdapter implements IExchangeAdapter {
     try {
       const currentAd = await this.getRawAd(adId);
       if (!currentAd) {
-        console.warn(`⚠️ [Bybit] Ордер #${adId} не найден в списке пользователя`);
+        console.warn(
+          `⚠️ [Bybit] Ордер #${adId} не найден в списке пользователя`,
+        );
         return false;
       }
 
@@ -271,27 +298,18 @@ export class BybitAdapter implements IExchangeAdapter {
       const timestamp = await this.getSyncedTimestamp();
       const recvWindow = "10000";
 
-      const rawPrefs = currentAd.tradingPreferenceSet || {};
-      const formattedTradingPrefs: Record<string, string> = {};
-      for (const [key, val] of Object.entries(rawPrefs)) {
-        if (val !== undefined && val !== null && val !== "") {
-          formattedTradingPrefs[key] = String(val);
-        }
-      }
-
       const updatePayload: Record<string, any> = {
         id: String(currentAd.id),
-        actionType: "MODIFY",
-        priceType: String(currentAd.priceType ?? "0"),
-        premium: String(currentAd.premium ?? ""),
+        priceType: Number(currentAd.priceType ?? 0),
+        premium: String(currentAd.premium ?? "0"),
         price: newPrice.toFixed(2),
         quantity: String(currentAd.lastQuantity ?? currentAd.quantity ?? "100"),
         minAmount: String(currentAd.minAmount ?? "500"),
         maxAmount: String(currentAd.maxAmount ?? "50000"),
-        paymentPeriod: String(currentAd.paymentPeriod ?? "15"),
+        paymentPeriod: Number(currentAd.paymentPeriod ?? 15),
         remark: String(currentAd.remark || ""),
         paymentIds: paymentIds.slice(0, 5),
-        tradingPreferenceSet: formattedTradingPrefs,
+        tradingPreferenceSet: currentAd.tradingPreferenceSet || {},
       };
 
       const bodyStr = JSON.stringify(updatePayload);
@@ -312,7 +330,7 @@ export class BybitAdapter implements IExchangeAdapter {
             "X-BAPI-SIGN": signature,
           },
           timeout: 6000,
-        }
+        },
       );
 
       const isSuccess =
@@ -326,7 +344,7 @@ export class BybitAdapter implements IExchangeAdapter {
         if (ceilingMatch && ceilingMatch[1]) {
           const maxAllowed = parseFloat(ceilingMatch[1]);
           console.log(
-            `🎯 [Bybit] Коррекция под потолок биржи: ставим ${maxAllowed.toFixed(2)} UAH`
+            `🎯 [Bybit] Коррекция под потолок биржи: ставим ${maxAllowed.toFixed(2)} UAH`,
           );
           timestamps.pop();
           return this.updateAdPrice(adId, maxAllowed);
@@ -336,13 +354,13 @@ export class BybitAdapter implements IExchangeAdapter {
       }
 
       console.log(
-        `✅ [Bybit API] Ордер #${adId} успешно выставлен на ${newPrice.toFixed(2)} UAH (использовано ${timestamps.length}/8 лимита)`
+        `✅ [Bybit API] Ордер #${adId} успешно выставлен на ${newPrice.toFixed(2)} UAH (использовано ${timestamps.length}/8 лимита)`,
       );
       return true;
     } catch (err: any) {
       console.error(
         `❌ [Bybit API Network Error]:`,
-        err.response?.data || err.message
+        err.response?.data || err.message,
       );
       return false;
     }
