@@ -156,7 +156,6 @@ export class BybitAdapter implements IExchangeAdapter {
     try {
       const timestamp = await this.getSyncedTimestamp();
       const recvWindow = "10000";
-      // Отправляем пустой объект или валидный size <= 30
       const bodyStr = JSON.stringify({});
       const signature = this.signRequest(timestamp, recvWindow, bodyStr);
 
@@ -175,18 +174,18 @@ export class BybitAdapter implements IExchangeAdapter {
         },
       );
 
-      console.log("Bybit fetchMyAds response:", response.data);
-
       const rawItems = response.data?.result?.items || [];
-      return rawItems.map((ad: any) => ({
-        id: String(ad.id),
-        tokenId: String(ad.tokenId || "USDT"),
-        currencyId: String(ad.currencyId || "UAH"),
-        // По документу Bybit: 0 - buy, 1 - sell
-        side: Number(ad.side) === 1 ? "SELL" : "BUY",
-        price: String(ad.price || "0"),
-        status: Number(ad.status || 0),
-      }));
+
+      return rawItems
+        .filter((ad: any) => Number(ad.status) === 10)
+        .map((ad: any) => ({
+          id: String(ad.id),
+          tokenId: String(ad.tokenId || "USDT"),
+          currencyId: String(ad.currencyId || "UAH"),
+          side: Number(ad.side) === 1 ? "SELL" : "BUY",
+          price: String(ad.price || "0"),
+          status: 10,
+        }));
     } catch (err: any) {
       console.warn(`⚠️ [Bybit] Ошибка получения объявлений: ${err.message}`);
       return [];
