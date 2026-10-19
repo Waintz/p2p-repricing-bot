@@ -264,6 +264,17 @@ bot.command("start", async (ctx) => {
   await showMainMenu(ctx, false);
 });
 
+// bot.command("test", async (ctx) => {
+//   await bybitAdapter.test({
+//     asset: "USDT",
+//     fiat: "UAH",
+//     side: "BUY",
+//     competitorNicks: ["obmen_minyta", "ТурбоОбмен", "CashLogistik", "mria_trading"],
+//     maxPrice: 50,
+//     minPrice: 45,
+//   });
+// });
+
 bot.callbackQuery("main_menu", async (ctx) => {
   await ctx.answerCallbackQuery();
   await showMainMenu(ctx, true);

@@ -52,7 +52,7 @@ export class BybitAdapter implements IExchangeAdapter {
     "https://api.bybit.com/fiat/otc/item/online";
   private readonly PRIVATE_API_URL = "https://api.bybit.com";
 
-  private readonly MAX_SCAN_PAGES = 8;
+  private readonly MAX_SCAN_PAGES = 10;
 
   private timeOffset: number = 0;
   private lastTimeSync: number = 0;
@@ -78,24 +78,19 @@ export class BybitAdapter implements IExchangeAdapter {
     return (Date.now() + this.timeOffset).toString();
   }
 
+  // Функция для строгого получения страницы с резервным URL с размеров в 300 единиц
   private async fetchPageStrict(
     asset: string,
     fiat: string,
     bybitSide: string,
     page: number,
-    paymentIds: string[]
   ): Promise<any[] | null> {
     const payload = {
-      userId: "",
       tokenId: asset,
       currencyId: fiat,
-      payment: paymentIds,
       side: bybitSide,
-      size: "30",
+      size: "300",
       page: String(page),
-      amount: "",
-      authMaker: false,
-      canTrade: false,
     };
 
     const headers = {
@@ -119,12 +114,15 @@ export class BybitAdapter implements IExchangeAdapter {
         });
         return responseBackup.data?.result?.items || [];
       } catch (err: any) {
-        console.warn(`⚠️ [Bybit] Ошибка стакана (стр. ${page}): ${err.message}`);
+        console.warn(
+          `⚠️ [Bybit] Ошибка стакана (стр. ${page}): ${err.message}`,
+        );
         return null;
       }
     }
   }
 
+  // получаем самого сильного конкурента
   public async fetchOrderBook(
     params: FetchOrderBookParams,
   ): Promise<MarketOrder[]> {
@@ -134,7 +132,6 @@ export class BybitAdapter implements IExchangeAdapter {
       maxPrice?: number;
     };
 
-    const paymentIds = BYBIT_PAYMENT_MAP[params.paymentMethod] || [];
     const bybitSide = params.side === "SELL" ? "1" : "0";
 
     const targetNicks = extra.competitorNicks?.length
@@ -153,6 +150,7 @@ export class BybitAdapter implements IExchangeAdapter {
       const price = parseFloat(item?.price || "0");
 
       if (stop.nicks && !stop.nicks.has(nick)) return false;
+      if (!Number.isFinite(price)) return false;
       if (stop.minPrice !== undefined && price < stop.minPrice) return false;
       if (stop.maxPrice !== undefined && price > stop.maxPrice) return false;
       return true;
@@ -161,14 +159,14 @@ export class BybitAdapter implements IExchangeAdapter {
     let allRawItems: any[] = [];
     const seenOrderIds = new Set<string>();
 
-    // Постраничное сканирование с автоматической остановкой при нахождении нужного конкурента в коридоре
+    // Загружаем все доступные страницы: лучший конкурент может находиться
+    // не на первой странице.
     for (let page = 1; page <= this.MAX_SCAN_PAGES; page++) {
       const items = await this.fetchPageStrict(
         params.asset,
         params.fiat,
         bybitSide,
         page,
-        paymentIds
       );
 
       if (items === null || items.length === 0) break;
@@ -181,40 +179,23 @@ export class BybitAdapter implements IExchangeAdapter {
         }
       }
 
-      // Если в загруженных объявлениях найден целевой конкурент в рамках коридора цены — прекращаем опрос
-      if (items.some(isTargetCompetitorInCorridor)) {
-        console.log(
-          `⏹️ [Bybit] Целевой конкурент найден в коридоре на стр. ${page}, загружено ${allRawItems.length} объявлений`
-        );
-        break;
-      }
-
-      // Проверка граничной цены последней записи на странице
-      const lastItem = items[items.length - 1];
-      const lastPrice = parseFloat(lastItem?.price || "0");
-      if (lastPrice > 0) {
-        if (params.side === "BUY" && stop.minPrice !== undefined && lastPrice < stop.minPrice) {
-          break;
-        }
-        if (params.side === "SELL" && stop.maxPrice !== undefined && lastPrice > stop.maxPrice) {
-          break;
-        }
-      }
-
-      if (items.length < 30) break;
+      if (items.length < 300) break;
     }
+
+    const matchingItems = allRawItems.filter(isTargetCompetitorInCorridor);
+    const hightCompetitor = matchingItems.reduce<any | null>(
+      (highest, item) => {
+        const price = parseFloat(item.price);
+        return highest === null || price > parseFloat(highest.price)
+          ? item
+          : highest;
+      },
+      null,
+    );
 
     const mappedOrders: MarketOrder[] = allRawItems.map((item: any) => {
       const rawPayments: string[] = (item.payments || []).map(String);
       const mappedMethods: string[] = [...rawPayments];
-
-      const matchesPayment =
-        paymentIds.length === 0 ||
-        paymentIds.some((pid) => rawPayments.includes(pid));
-
-      if (matchesPayment) {
-        mappedMethods.push(params.paymentMethod);
-      }
 
       return {
         orderId: String(item.id),
@@ -229,7 +210,7 @@ export class BybitAdapter implements IExchangeAdapter {
     });
 
     console.log(
-      `📚 [Bybit] Стакан ${params.asset}/${params.fiat} (${params.side} -> side ${bybitSide}, банк: ${params.paymentMethod}): получено ${mappedOrders.length} ордеров`
+      `📚 [Bybit] Стакан ${params.asset}/${params.fiat} (${params.side} -> side ${bybitSide}, получено ${mappedOrders.length} ордеров, лучший конкурент: ${hightCompetitor?.nickName ?? "не найден"} ${hightCompetitor?.price ?? ""})`,
     );
 
     return mappedOrders;
@@ -279,15 +260,19 @@ export class BybitAdapter implements IExchangeAdapter {
         .filter((ad: any) => Number(ad.status) === 10)
         .map((ad: any) => ({
           id: String(ad.id),
-          tokenId: String(ad.tokenId || ad.tokenName || "USDT").trim().toUpperCase(),
-          currencyId: String(ad.currencyId || "UAH").trim().toUpperCase(),
+          tokenId: String(ad.tokenId || ad.tokenName || "USDT")
+            .trim()
+            .toUpperCase(),
+          currencyId: String(ad.currencyId || "UAH")
+            .trim()
+            .toUpperCase(),
           side: Number(ad.side) === 1 ? "SELL" : "BUY",
           price: String(ad.price || "0"),
           status: 10,
         }));
 
       console.log(
-        `📋 [Bybit] Загружено личных активных объявлений (Online): ${activeAds.length} из ${rawItems.length}`
+        `📋 [Bybit] Загружено личных активных объявлений (Online): ${activeAds.length} из ${rawItems.length}`,
       );
       return activeAds;
     } catch (err: any) {
@@ -504,5 +489,79 @@ export class BybitAdapter implements IExchangeAdapter {
       );
       return false;
     }
+  }
+
+  public async test(
+    params: FetchOrderBookParams,
+  ): Promise<{ nickName: string; price: number } | null> {
+    const extra = params as FetchOrderBookParams & {
+      competitorNicks?: string[];
+      minPrice?: number;
+      maxPrice?: number;
+    };
+
+    const bybitSide = params.side === "SELL" ? "1" : "0";
+
+    const targetNicks = extra.competitorNicks?.length
+      ? new Set(extra.competitorNicks.map(normalizeNick))
+      : undefined;
+
+    let hightCompetitor: { nickName: string; price: number } | null = null;
+
+    const stop: BybitStopCondition = {
+      ourSide: params.side,
+      nicks: targetNicks,
+      minPrice: extra.minPrice,
+      maxPrice: extra.maxPrice,
+    };
+
+    const isTargetCompetitorInCorridor = (item: any): boolean => {
+      const nick = normalizeNick(item?.nickName);
+      const price = parseFloat(item?.price || "0");
+
+      if (stop.nicks && !stop.nicks.has(nick)) return false;
+      if (!Number.isFinite(price)) return false;
+      if (stop.minPrice !== undefined && price < stop.minPrice) return false;
+      if (stop.maxPrice !== undefined && price > stop.maxPrice) return false;
+      return true;
+    };
+
+    const seenOrderIds = new Set<string>();
+
+    for (let page = 1; page <= this.MAX_SCAN_PAGES; page++) {
+      const items = await this.fetchPageStrict(
+        params.asset,
+        params.fiat,
+        bybitSide,
+        page,
+      );
+
+      if (items === null || items.length === 0) break;
+
+      for (const item of items) {
+        const idStr = String(item.id);
+        if (seenOrderIds.has(idStr)) continue;
+        seenOrderIds.add(idStr);
+
+        if (!isTargetCompetitorInCorridor(item)) continue;
+
+        const price = parseFloat(item.price);
+        if (hightCompetitor === null || price > hightCompetitor.price) {
+          hightCompetitor = {
+            nickName: String(item.nickName || ""),
+            price,
+          };
+        }
+      }
+
+      if (items.length < 300) break;
+    }
+
+    console.log(
+      `📚 [Bybit] Лучший конкурент ${params.asset}/${params.fiat} (${params.side} -> side ${bybitSide}):`,
+      hightCompetitor,
+    );
+
+    return hightCompetitor;
   }
 }

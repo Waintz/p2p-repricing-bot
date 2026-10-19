@@ -353,7 +353,8 @@ export class BinanceAdapter implements IExchangeAdapter {
         maxPrice?: number;
       };
 
-      const code = String(params.paymentMethod || "").toUpperCase();
+      const paymentMethod = params.paymentMethod || "";
+      const code = paymentMethod.toUpperCase();
       const serverPayType = BINANCE_PAY_TYPE_MAP[code];
       const tokenSets = BANK_TOKENS[code];
       const localAccept = tokenSets
@@ -449,7 +450,9 @@ export class BinanceAdapter implements IExchangeAdapter {
           nickName,
           price,
           payTime,
-          paymentMethods: [params.paymentMethod, ...tradeMethods],
+          paymentMethods: paymentMethod
+            ? [paymentMethod, ...tradeMethods]
+            : tradeMethods,
         });
       }
 

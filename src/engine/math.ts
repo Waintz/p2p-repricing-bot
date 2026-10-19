@@ -3,12 +3,12 @@ export interface MarketOrder {
   nickName: string;
   price: number;
   payTime: number;
-  paymentMethods: string[];
+  paymentMethods?: string[];
 }
 
 export interface RuleConfig {
   side: "BUY" | "SELL";
-  paymentMethod: string;
+  paymentMethod?: string;
   step: number;
   minPrice: number;
   maxPrice: number;

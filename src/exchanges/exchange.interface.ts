@@ -4,7 +4,7 @@ export interface FetchOrderBookParams {
   asset: "USDT" | "USDC";
   fiat: string;
   side: "BUY" | "SELL";
-  paymentMethod: string;
+  paymentMethod?: string;
   competitorNicks?: string[];
   minPrice?: number;
   maxPrice?: number;

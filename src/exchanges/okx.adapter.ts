@@ -65,7 +65,8 @@ export class OkxAdapter implements IExchangeAdapter {
         return [];
       }
 
-      const mappedPaymentKeywords = OKX_PAYMENT_MAP[params.paymentMethod] || [];
+      const paymentMethod = params.paymentMethod || "";
+      const mappedPaymentKeywords = OKX_PAYMENT_MAP[paymentMethod] || [];
 
       return rawList.map((item: any) => {
         const itemPayments: string[] = Array.isArray(item.paymentMethods)
@@ -83,7 +84,9 @@ export class OkxAdapter implements IExchangeAdapter {
 
         const paymentMethods = [...itemPayments];
         if (isPaymentMatched) {
-          paymentMethods.push(params.paymentMethod);
+          if (paymentMethod) {
+            paymentMethods.push(paymentMethod);
+          }
         }
 
         return {
