@@ -14,14 +14,6 @@ export interface BinanceMyAd {
   advStatus: number;
 }
 
-interface StopCondition {
-  ourSide: "BUY" | "SELL";
-  nicks?: Set<string>;
-  minPrice?: number;
-  maxPrice?: number;
-  accept?: (item: any) => boolean;
-}
-
 function normalizeNick(nick: string): string {
   return String(nick ?? "")
     .normalize("NFKC")
@@ -79,18 +71,6 @@ function matchesBank(item: any, tokenSets: string[][]): boolean {
   });
 }
 
-function priceOf(item: any): number {
-  return parseFloat(item?.adv?.price || "0");
-}
-
-function lastPriceOf(items: any[]): number {
-  for (let i = items.length - 1; i >= 0; i--) {
-    const v = priceOf(items[i]);
-    if (v > 0) return v;
-  }
-  return 0;
-}
-
 export class BinanceAdapter implements IExchangeAdapter {
   public readonly name = "BINANCE";
 
@@ -98,7 +78,6 @@ export class BinanceAdapter implements IExchangeAdapter {
     "https://p2p.binance.com/bapi/c2c/v2/friendly/c2c/adv/search";
   private readonly PRIVATE_API_URL = "https://api.binance.com";
 
-  private readonly MAX_PROBE_PAGE = 60;
   private readonly MAX_SCAN_PAGES = 10;
 
   private blockedUntil = 0;
@@ -106,8 +85,6 @@ export class BinanceAdapter implements IExchangeAdapter {
 
   private pageCache = new Map<string, { ts: number; items: any[] }>();
   private readonly PAGE_CACHE_TTL_MS = 10_000;
-
-  private pageHints = new Map<string, number>();
 
   private discoveredBanks = new Set<string>();
 
@@ -150,7 +127,7 @@ export class BinanceAdapter implements IExchangeAdapter {
           page,
           payTypes: payType ? [payType] : [],
           publisherType: null,
-          rows: 20,
+          rows: 60,
           tradeType,
           classifies: ["mass", "profession", "fiat_trade"],
         },
@@ -195,131 +172,43 @@ export class BinanceAdapter implements IExchangeAdapter {
   }
 
   /**
-   * Стакан отсортирован по цене. Вместо чтения всех страниц подряд находим бинарным поиском
-   * страницу, где начинается коридор цены правила, и читаем только страницы внутри него.
-   * Возвращает null, если поиск не удалось завершить (сбой, лимит, коридор слишком глубоко):
-   * в этом случае цену менять нельзя, иначе бот решит, что конкурента нет.
+   * Загружает страницы стакана до конца доступных данных или лимита.
+   * Нельзя останавливаться после первого найденного конкурента: следующий
+   * конкурент может иметь более подходящую цену.
    */
-  private async fetchCorridor(
+  private async fetchPages(
     asset: string,
     fiat: string,
     tradeType: "BUY" | "SELL",
     payType: string | undefined,
-    stop: StopCondition
   ): Promise<any[] | null> {
-    const side = stop.ourSide;
-    const boundary = side === "BUY" ? stop.maxPrice : stop.minPrice;
+    const collected: any[] = [];
+    const seenAdvNos = new Set<string>();
 
-    const isBefore = (items: any[]): boolean => {
-      if (boundary === undefined) return false;
-      const lp = lastPriceOf(items);
-      if (!lp) return false;
-      return side === "BUY" ? lp > boundary : lp < boundary;
-    };
+    for (let page = 1; page <= this.MAX_SCAN_PAGES; page++) {
+      const items = await this.fetchPageStrict(
+        asset,
+        fiat,
+        tradeType,
+        page,
+        payType,
+      );
 
-    const get = async (p: number): Promise<any[]> => {
-      const items = await this.fetchPageStrict(asset, fiat, tradeType, p, payType);
-      if (items === null) throw new Error("PAGE_FAIL");
-      return items;
-    };
+      if (items === null) return null;
+      if (items.length === 0) break;
 
-    const notBefore = async (p: number): Promise<boolean> => {
-      const items = await get(p);
-      return items.length === 0 || !isBefore(items);
-    };
-
-    const isFound = (item: any): boolean => {
-      const nick = normalizeNick(item?.advertiser?.nickName);
-      const price = priceOf(item);
-      if (stop.nicks && !stop.nicks.has(nick)) return false;
-      if (stop.accept && !stop.accept(item)) return false;
-      if (stop.minPrice !== undefined && price < stop.minPrice) return false;
-      if (stop.maxPrice !== undefined && price > stop.maxPrice) return false;
-      return true;
-    };
-
-    const hintKey = [asset, fiat, tradeType, payType ?? "*", side, boundary].join("|");
-
-    try {
-      const hint = Math.max(1, this.pageHints.get(hintKey) ?? 1);
-      let lo = 0;
-      let hi = -1;
-
-      if (await notBefore(hint)) {
-        hi = hint;
-        let step = 2;
-        while (hi > 1) {
-          const q = Math.max(1, hi - step);
-          if (await notBefore(q)) {
-            hi = q;
-            step *= 2;
-          } else {
-            lo = q;
-            break;
-          }
-        }
-      } else {
-        lo = hint;
-        let step = 4;
-        while (hi === -1) {
-          const q = lo + step;
-          if (q > this.MAX_PROBE_PAGE) {
-            if (lo < this.MAX_PROBE_PAGE && (await notBefore(this.MAX_PROBE_PAGE))) {
-              hi = this.MAX_PROBE_PAGE;
-              break;
-            }
-            console.warn(
-              `⚠️ [Binance] Коридор цены лежит глубже ${this.MAX_PROBE_PAGE} страниц стакана — цену не меняю`
-            );
-            return null;
-          }
-          if (await notBefore(q)) {
-            hi = q;
-          } else {
-            lo = q;
-            step *= 2;
-          }
+      for (const item of items) {
+        const advNo = String(item?.adv?.advNo || "");
+        if (advNo && !seenAdvNos.has(advNo)) {
+          seenAdvNos.add(advNo);
+          collected.push(item);
         }
       }
 
-      while (hi - lo > 1) {
-        const mid = Math.floor((lo + hi) / 2);
-        if (await notBefore(mid)) hi = mid;
-        else lo = mid;
-      }
-
-      const startPage = hi;
-      this.pageHints.set(hintKey, startPage);
-
-      const from = Math.max(1, startPage - 1);
-      const collected: any[] = [];
-
-      for (let p = from; p < from + this.MAX_SCAN_PAGES; p++) {
-        const items = await get(p);
-        collected.push(...items);
-
-        if (items.length < 20) break;
-
-        if (items.some(isFound)) {
-          console.log(
-            `⏹️ [Binance] Конкурент найден (страницы ${from}..${p}), загружено ${collected.length} объявлений`
-          );
-          break;
-        }
-
-        const lp = lastPriceOf(items);
-        if (lp > 0) {
-          if (side === "BUY" && stop.minPrice !== undefined && lp < stop.minPrice) break;
-          if (side === "SELL" && stop.maxPrice !== undefined && lp > stop.maxPrice) break;
-        }
-      }
-
-      return collected;
-    } catch (err: any) {
-      if (err?.message === "PAGE_FAIL") return null;
-      console.warn(`⚠️ [Binance] Ошибка поиска по стакану: ${err?.message}`);
-      return null;
+      if (items.length < 60) break;
     }
+
+    return collected;
   }
 
   private logDiscoveredBanks(code: string, items: any[]) {
@@ -361,30 +250,10 @@ export class BinanceAdapter implements IExchangeAdapter {
         ? (item: any) => matchesBank(item, tokenSets)
         : undefined;
 
-      const makeStop = (
-        accept?: (item: any) => boolean
-      ): StopCondition | undefined =>
-        (extra.competitorNicks?.length || extra.matchAllCompetitors)
-          ? {
-              ourSide: params.side,
-              nicks: extra.competitorNicks?.length
-                ? new Set(extra.competitorNicks.map(normalizeNick))
-                : undefined,
-              minPrice: extra.minPrice,
-              maxPrice: extra.maxPrice,
-              accept,
-            }
-          : undefined;
-
       const load = async (
         payType: string | undefined,
-        accept?: (item: any) => boolean
       ): Promise<any[] | null> => {
-        const stop = makeStop(accept);
-        if (!stop) {
-          return this.fetchPageStrict(params.asset, params.fiat, tradeType, 1, payType);
-        }
-        return this.fetchCorridor(params.asset, params.fiat, tradeType, payType, stop);
+        return this.fetchPages(params.asset, params.fiat, tradeType, payType);
       };
 
       let allData: any[] = [];
@@ -413,19 +282,43 @@ export class BinanceAdapter implements IExchangeAdapter {
       }
 
       if (!usedServerFilter) {
-        const raw = await load(undefined, localAccept);
+        const raw = await load(undefined);
         if (raw === null) return [];
         allData = raw;
 
-        if (localAccept) {
-          this.logDiscoveredBanks(code, allData);
-          allData = allData.filter(localAccept);
-        } else if (code) {
-          console.warn(
-            `⚠️ [Binance] Для банка "${code}" нет правила отбора в BANK_TOKENS: стакан показан без фильтра по банку`
-          );
-        }
       }
+
+      if (localAccept) {
+        this.logDiscoveredBanks(code, allData);
+        allData = allData.filter(localAccept);
+      } else if (code && !serverPayType) {
+        console.warn(
+          `⚠️ [Binance] Для банка "${code}" нет правила отбора в BANK_TOKENS: стакан показан без фильтра по банку`
+        );
+      }
+
+      const targetNicks = extra.competitorNicks?.length
+        ? new Set(extra.competitorNicks.map(normalizeNick))
+        : undefined;
+      const matchAllCompetitors = extra.matchAllCompetitors === true;
+
+      allData = allData.filter((item) => {
+        const nick = normalizeNick(item?.advertiser?.nickName);
+        const price = parseFloat(item?.adv?.price || "0");
+
+        if (!matchAllCompetitors && targetNicks && !targetNicks.has(nick)) {
+          return false;
+        }
+        if (!Number.isFinite(price)) return false;
+        if (extra.minPrice !== undefined && price < extra.minPrice) {
+          return false;
+        }
+        if (extra.maxPrice !== undefined && price > extra.maxPrice) {
+          return false;
+        }
+
+        return true;
+      });
 
       const uniqueOrders = new Map<string, MarketOrder>();
 
