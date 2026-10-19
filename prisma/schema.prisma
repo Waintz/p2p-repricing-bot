@@ -45,6 +45,7 @@ model AdRule {
 model Competitor {
   id        Int     @id @default(autoincrement())
   nickname  String // Ник конкурента на бирже (как он отображается в стакане)
+  orderIds  String  @default("[]") // JSON-массив выбранных ID объявлений Bybit
   isEnabled Boolean @default(true) // Можно временно выключать/включать без удаления
 
   adRuleId Int

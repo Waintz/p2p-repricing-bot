@@ -476,12 +476,17 @@ async function renderCompetitorsMenu(ctx: BotContext, ruleId: number) {
   const kb = new InlineKeyboard();
   for (const comp of rule.competitors) {
     const icon = comp.isEnabled ? "✅" : "❌";
+    const selectedOrderIds: string[] = JSON.parse(comp.orderIds || "[]");
     const stepLabel =
       comp.step !== null && comp.step !== undefined
         ? `Шаг: ${comp.step.toFixed(2)}`
         : `Шаг: общий (${rule.step.toFixed(2)})`;
 
     kb.text(`${icon} ${comp.nickname}`, `toggle_comp:${comp.id}:${ruleId}`)
+      .text(
+        `📋 Ads${selectedOrderIds.length ? ` (${selectedOrderIds.length})` : ""}`,
+        `select_comp_ads:${comp.id}:${ruleId}`,
+      )
       .text(`📏 ${stepLabel}`, `ask_comp_step:${comp.id}:${ruleId}`)
       .text("🗑", `del_comp:${comp.id}:${ruleId}`)
       .row();
@@ -497,6 +502,85 @@ async function renderCompetitorsMenu(ctx: BotContext, ruleId: number) {
     .editMessageText(text, { parse_mode: "HTML", reply_markup: kb })
     .catch(() => {});
 }
+
+bot.callbackQuery(/^select_comp_ads:(\d+):(\d+)$/, async (ctx) => {
+  const compId = Number(ctx.match[1]);
+  const ruleId = Number(ctx.match[2]);
+  const [rule, comp] = await Promise.all([
+    prisma.adRule.findUnique({ where: { id: ruleId } }),
+    prisma.competitor.findUnique({ where: { id: compId } }),
+  ]);
+
+  if (!rule || !comp || rule.exchange !== "BYBIT") {
+    await ctx.answerCallbackQuery("Доступно только для конкурентов Bybit");
+    return;
+  }
+
+  await ctx.answerCallbackQuery({ text: "Загружаю объявления Bybit..." });
+  const orders = await bybitAdapter.fetchOrderBook({
+    asset: rule.asset as "USDT" | "USDC",
+    fiat: rule.fiat,
+    side: rule.side as "BUY" | "SELL",
+    competitorNicks: [comp.nickname],
+    minPrice: rule.minPrice,
+    maxPrice: rule.maxPrice,
+  });
+
+  const selectedOrderIds: string[] = JSON.parse(comp.orderIds || "[]");
+  const matchingOrders = orders
+    .filter((order) => {
+      const sameNick =
+        order.nickName.trim().toLowerCase() === comp.nickname.trim().toLowerCase();
+      const inRange =
+        order.price >= rule.minPrice && order.price <= rule.maxPrice;
+      return sameNick && inRange;
+    })
+    .sort((a, b) => b.price - a.price);
+
+  const kb = new InlineKeyboard();
+  for (const order of matchingOrders.slice(0, 30)) {
+    const selected = selectedOrderIds.includes(order.orderId);
+    kb.text(
+      `${selected ? "✅" : "⬜"} ${order.price.toFixed(2)} | #${order.orderId.slice(-8)} | ${order.payTime} мин`,
+      `toggle_comp_ad:${comp.id}:${ruleId}:${order.orderId}`,
+    ).row();
+  }
+  kb.text("⬅️ Назад к конкурентам", `menu_comp:${ruleId}`);
+
+  await ctx.editMessageText(
+    `📋 <b>Объявления ${comp.nickname}</b>\n` +
+      `Диапазон: <b>${rule.minPrice.toFixed(2)}–${rule.maxPrice.toFixed(2)}</b>\n` +
+      `Выбери одно или несколько объявлений. Бот будет следить только за выбранными ID.`,
+    { parse_mode: "HTML", reply_markup: kb },
+  );
+});
+
+bot.callbackQuery(/^toggle_comp_ad:(\d+):(\d+):(\d+)$/, async (ctx) => {
+  const compId = Number(ctx.match[1]);
+  const ruleId = Number(ctx.match[2]);
+  const orderId = ctx.match[3];
+  const comp = await prisma.competitor.findUnique({ where: { id: compId } });
+  if (!comp) return;
+
+  const selectedOrderIds: string[] = JSON.parse(comp.orderIds || "[]");
+  const nextOrderIds = selectedOrderIds.includes(orderId)
+    ? selectedOrderIds.filter((id) => id !== orderId)
+    : [...selectedOrderIds, orderId];
+
+  await prisma.competitor.update({
+    where: { id: compId },
+    data: { orderIds: JSON.stringify(nextOrderIds) },
+  });
+  await prisma.adRule.update({
+    where: { id: ruleId },
+    data: { matchAllCompetitors: false },
+  });
+
+  await ctx.answerCallbackQuery(
+    nextOrderIds.includes(orderId) ? "Объявление выбрано" : "Объявление отключено",
+  );
+  await renderCompetitorsMenu(ctx, ruleId);
+});
 
 bot.callbackQuery(/^menu_comp:(\d+)$/, async (ctx) => {
   await ctx.answerCallbackQuery();

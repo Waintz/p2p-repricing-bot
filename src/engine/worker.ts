@@ -75,6 +75,10 @@ export class RepricingWorker {
       rule.paymentMethod,
       rule.matchAllCompetitors ? "ALL" : "NICKS",
       ...nicks,
+      ...rule.competitors
+        .filter((c: any) => c.isEnabled)
+        .flatMap((c: any) => JSON.parse(c.orderIds || "[]"))
+        .sort(),
     ].join("|");
   }
 
@@ -106,6 +110,9 @@ export class RepricingWorker {
             competitorNicks: rule.competitors
               .filter((c: any) => c.isEnabled)
               .map((c: any) => c.nickname),
+            competitorOrderIds: rule.competitors
+              .filter((c: any) => c.isEnabled)
+              .flatMap((c: any) => JSON.parse(c.orderIds || "[]")),
             matchAllCompetitors: rule.matchAllCompetitors === true,
             minPrice: Math.min(...sharing.map((c) => c.minPrice)),
             maxPrice: Math.max(...sharing.map((c) => c.maxPrice)),
@@ -133,6 +140,7 @@ export class RepricingWorker {
           matchAllCompetitors: rule.matchAllCompetitors === true,
           competitors: rule.competitors.map((c: any) => ({
             nickname: c.nickname,
+            orderIds: JSON.parse(c.orderIds || "[]"),
             isEnabled: c.isEnabled,
             step: c.step,
           })),

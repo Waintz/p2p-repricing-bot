@@ -6,6 +6,7 @@ export interface FetchOrderBookParams {
   side: "BUY" | "SELL";
   paymentMethod?: string;
   competitorNicks?: string[];
+  competitorOrderIds?: string[];
   minPrice?: number;
   maxPrice?: number;
   matchAllCompetitors?: boolean;

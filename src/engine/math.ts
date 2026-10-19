@@ -17,6 +17,7 @@ export interface RuleConfig {
   matchAllCompetitors?: boolean;
   competitors: {
     nickname: string;
+    orderIds?: string[];
     isEnabled: boolean;
     step?: number | null;
   }[];
@@ -52,7 +53,7 @@ export function calculateNewPrice(
 ): CalculationResult {
   const activeCompetitorsMap = new Map<
     string,
-    { nickname: string; step?: number | null }
+    { nickname: string; orderIds?: string[]; step?: number | null }
   >();
 
   for (const competitor of rule.competitors) {
@@ -85,6 +86,14 @@ export function calculateNewPrice(
     const competitorConfig = activeCompetitorsMap.get(orderNick);
 
     if (!matchAllCompetitors && !competitorConfig) {
+      continue;
+    }
+
+    if (
+      competitorConfig?.orderIds &&
+      competitorConfig.orderIds.length > 0 &&
+      !competitorConfig.orderIds.includes(order.orderId)
+    ) {
       continue;
     }
 

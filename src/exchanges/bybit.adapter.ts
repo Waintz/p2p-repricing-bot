@@ -57,6 +57,23 @@ export class BybitAdapter implements IExchangeAdapter {
   private timeOffset: number = 0;
   private lastTimeSync: number = 0;
   private updateHistory: Map<string, number[]> = new Map();
+  private readonly priceCeilings: Map<string, number> = new Map();
+  private readonly statusCooldownMs = 5 * 60 * 1000;
+  private readonly statusCooldownUntil: Map<string, number> = new Map();
+
+  public isAdCoolingDown(adId: string): boolean {
+    const cooldownUntil = this.statusCooldownUntil.get(adId) || 0;
+    if (cooldownUntil <= Date.now()) {
+      this.statusCooldownUntil.delete(adId);
+      return false;
+    }
+
+    const waitSec = Math.ceil((cooldownUntil - Date.now()) / 1000);
+    console.log(
+      `⏳ [Bybit] Ордер #${adId} пропущен: объявление временно нельзя менять. Осталось ${waitSec}с.`,
+    );
+    return true;
+  }
 
   private async getSyncedTimestamp(): Promise<string> {
     const now = Date.now();
@@ -137,6 +154,9 @@ export class BybitAdapter implements IExchangeAdapter {
     const targetNicks = extra.competitorNicks?.length
       ? new Set(extra.competitorNicks.map(normalizeNick))
       : undefined;
+    const targetOrderIds = (params.competitorOrderIds || []).length
+      ? new Set(params.competitorOrderIds)
+      : undefined;
 
     const stop: BybitStopCondition = {
       ourSide: params.side,
@@ -147,9 +167,11 @@ export class BybitAdapter implements IExchangeAdapter {
 
     const isTargetCompetitorInCorridor = (item: any): boolean => {
       const nick = normalizeNick(item?.nickName);
+      const orderId = String(item?.id || "");
       const price = parseFloat(item?.price || "0");
 
       if (stop.nicks && !stop.nicks.has(nick)) return false;
+      if (targetOrderIds && !targetOrderIds.has(orderId)) return false;
       if (!Number.isFinite(price)) return false;
       if (stop.minPrice !== undefined && price < stop.minPrice) return false;
       if (stop.maxPrice !== undefined && price > stop.maxPrice) return false;
@@ -368,6 +390,14 @@ export class BybitAdapter implements IExchangeAdapter {
       return false;
     }
 
+    const knownCeiling = this.priceCeilings.get(adId);
+    if (knownCeiling !== undefined && newPrice > knownCeiling) {
+      console.warn(
+        `🛑 [Bybit] Ордер #${adId}: ${newPrice.toFixed(2)} выше известного потолка ${knownCeiling.toFixed(2)} UAH. Обновление пропущено, чтобы не снять объявление.`,
+      );
+      return false;
+    }
+
     try {
       const currentAd = await this.getRawAd(adId);
       if (!currentAd) {
@@ -375,6 +405,17 @@ export class BybitAdapter implements IExchangeAdapter {
           `⚠️ [Bybit] Ордер #${adId} не найден на бирже через getRawAd`,
         );
         return false;
+      }
+
+      const exchangePrice = Number(currentAd.price);
+      if (
+        Number.isFinite(exchangePrice) &&
+        Math.round(exchangePrice * 100) === Math.round(newPrice * 100)
+      ) {
+        console.log(
+          `⏸️ [Bybit] Ордер #${adId} уже выставлен на ${exchangePrice.toFixed(2)} UAH, запрос изменения не отправляем.`,
+        );
+        return true;
       }
 
       const rawTermsIds = (currentAd.paymentTerms || [])
@@ -458,16 +499,38 @@ export class BybitAdapter implements IExchangeAdapter {
         response.data?.ret_code === 0 || response.data?.retCode === 0;
 
       if (!isSuccess) {
+        const retCode = String(
+          response.data?.ret_code ?? response.data?.retCode ?? "",
+        );
         const errMsg = response.data?.ret_msg || "";
         console.warn(
-          `⚠️ [Bybit API Error]: Код ${response.data?.ret_code ?? response.data?.retCode} — ${errMsg}`,
+          `⚠️ [Bybit API Error]: Код ${retCode} — ${errMsg}`,
           JSON.stringify(response.data),
         );
         console.warn(`📦 Отправленный payload:`, bodyStr);
 
+        if (
+          retCode === "912300121" ||
+          retCode === "912120050" ||
+          /ads cannot be modified in the current status/i.test(String(errMsg))
+        ) {
+          this.statusCooldownUntil.set(
+            adId,
+            Date.now() + this.statusCooldownMs,
+          );
+          timestamps.pop();
+          console.warn(
+            retCode === "912120050"
+              ? `⏸️ [Bybit] Ордер #${adId}: достигнут лимит 10 обновлений за 5 минут. Повторная попытка через 5 минут.`
+              : `⏸️ [Bybit] Ордер #${adId}: объявление нельзя менять в текущем статусе. Повторная попытка через 5 минут.`,
+          );
+          return false;
+        }
+
         const ceilingMatch = errMsg.match(/higher than ([\d.]+)/);
         if (ceilingMatch && ceilingMatch[1]) {
           const maxAllowed = parseFloat(ceilingMatch[1]);
+          this.priceCeilings.set(adId, maxAllowed);
           console.log(
             `🎯 [Bybit] Коррекция под потолок биржи: ставим ${maxAllowed.toFixed(2)} UAH`,
           );
