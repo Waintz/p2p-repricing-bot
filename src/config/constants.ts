@@ -18,4 +18,4 @@ export const PAYMENT_METHODS: Record<string, string> = {
   OSCHAD_BANK: "Ощадбанк",
 };
 
-export const PAY_TIMES = [15, 30, 45, 60] as const;
+export const PAY_TIMES = [15, 30, 45, 60, 180] as const;
