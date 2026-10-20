@@ -81,7 +81,7 @@ export class BinanceAdapter implements IExchangeAdapter {
     "https://p2p.binance.com/bapi/c2c/v2/friendly/c2c/adv/search";
   private readonly PRIVATE_API_URL = "https://api.binance.com";
 
-  private readonly MAX_SCAN_PAGES = 10;
+  private readonly MAX_SCAN_PAGES = 20;
 
   private blockedUntil = 0;
   private backoffMs = 120_000;
