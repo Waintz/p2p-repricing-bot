@@ -511,13 +511,18 @@ bot.callbackQuery(/^select_comp_ads:(\d+):(\d+)$/, async (ctx) => {
     prisma.competitor.findUnique({ where: { id: compId } }),
   ]);
 
-  if (!rule || !comp || rule.exchange !== "BYBIT") {
-    await ctx.answerCallbackQuery("Доступно только для конкурентов Bybit");
+  if (!rule || !comp) {
+    await ctx.answerCallbackQuery("Конкурент или правило не найдены");
     return;
   }
 
-  await ctx.answerCallbackQuery({ text: "Загружаю объявления Bybit..." });
-  const orders = await bybitAdapter.fetchOrderBook({
+  const exchangeName = rule.exchange.toUpperCase();
+  const adapter = exchangeName === "BINANCE" ? binanceAdapter : bybitAdapter;
+
+  await ctx.answerCallbackQuery({ text: `Загружаю объявления ${exchangeName}...` });
+
+  // Получаем стакан без фильтра банков, чтобы увидеть все доступные объявления этого ника
+  const orders = await adapter.fetchOrderBook({
     asset: rule.asset as "USDT" | "USDC",
     fiat: rule.fiat,
     side: rule.side as "BUY" | "SELL",
@@ -535,23 +540,30 @@ bot.callbackQuery(/^select_comp_ads:(\d+):(\d+)$/, async (ctx) => {
         order.price >= rule.minPrice && order.price <= rule.maxPrice;
       return sameNick && inRange;
     })
-    .sort((a, b) => b.price - a.price);
+    .sort((a, b) => (rule.side === "BUY" ? b.price - a.price : a.price - b.price));
+
+  if (matchingOrders.length === 0) {
+    await ctx.reply(
+      `⚠️ Активных объявлений конкурента [${comp.nickname}] на ${exchangeName} в диапазоне ${rule.minPrice.toFixed(2)}–${rule.maxPrice.toFixed(2)} не найдено в стакане.`
+    );
+    return;
+  }
 
   const kb = new InlineKeyboard();
   for (const order of matchingOrders.slice(0, 30)) {
     const selected = selectedOrderIds.includes(order.orderId);
     kb.text(
       `${selected ? "✅" : "⬜"} ${order.price.toFixed(2)} | #${order.orderId.slice(-8)} | ${order.payTime} мин`,
-      `toggle_comp_ad:${comp.id}:${ruleId}:${order.orderId}`,
+      `toggle_comp_ad:${comp.id}:${ruleId}:${order.orderId}`
     ).row();
   }
   kb.text("⬅️ Назад к конкурентам", `menu_comp:${ruleId}`);
 
   await ctx.editMessageText(
-    `📋 <b>Объявления ${comp.nickname}</b>\n` +
-      `Диапазон: <b>${rule.minPrice.toFixed(2)}–${rule.maxPrice.toFixed(2)}</b>\n` +
-      `Выбери одно или несколько объявлений. Бот будет следить только за выбранными ID.`,
-    { parse_mode: "HTML", reply_markup: kb },
+    `📋 <b>Объявления ${comp.nickname} (${exchangeName})</b>\n` +
+      `Диапазон: <b>${rule.minPrice.toFixed(2)}–${rule.maxPrice.toFixed(2)} UAH</b>\n` +
+      `Выберите объявления, за которыми нужно следить:`,
+    { parse_mode: "HTML", reply_markup: kb }
   );
 });
 
@@ -577,7 +589,9 @@ bot.callbackQuery(/^toggle_comp_ad:(\d+):(\d+):(\d+)$/, async (ctx) => {
   });
 
   await ctx.answerCallbackQuery(
-    nextOrderIds.includes(orderId) ? "Объявление выбрано" : "Объявление отключено",
+    nextOrderIds.includes(orderId)
+      ? "Объявление выбрано"
+      : "Объявление отключено",
   );
   await renderCompetitorsMenu(ctx, ruleId);
 });

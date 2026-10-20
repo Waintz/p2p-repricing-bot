@@ -48,7 +48,10 @@ const BINANCE_PAY_TYPE_MAP: Record<string, string> = {
 const BANK_TOKENS: Record<string, string[][]> = {
   MONOBANK_CARD: [["monobank", "card"]],
   MONOBANK_IBAN: [["monobank", "iban"]],
-  PRIVAT_CARD: [["privat", "card"], ["privat", "univer"]],
+  PRIVAT_CARD: [
+    ["privat", "card"],
+    ["privat", "univer"],
+  ],
   PRIVAT_IBAN: [["privat", "iban"]],
   ABANK_CARD: [["abank"], ["a-bank"], ["a bank"]],
   ABANK_IBAN: [["abankiban"], ["a-bankiban"], ["a bank iban"]],
@@ -107,7 +110,7 @@ export class BinanceAdapter implements IExchangeAdapter {
     fiat: string,
     tradeType: "BUY" | "SELL",
     page: number,
-    payType?: string
+    payType?: string,
   ): Promise<any[] | null> {
     const cacheKey = [asset, fiat, tradeType, payType ?? "*", page].join("|");
     const cached = this.pageCache.get(cacheKey);
@@ -138,7 +141,7 @@ export class BinanceAdapter implements IExchangeAdapter {
               "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
           },
           timeout: 8000,
-        }
+        },
       );
 
       this.backoffMs = 120_000;
@@ -159,12 +162,12 @@ export class BinanceAdapter implements IExchangeAdapter {
       if (status === 429 || status === 418) {
         this.blockedUntil = Date.now() + this.backoffMs;
         console.error(
-          `🛑 [Binance] Лимит запросов (HTTP ${status}). Пауза ${Math.round(this.backoffMs / 60000)} мин, запросов к Binance не будет.`
+          `🛑 [Binance] Лимит запросов (HTTP ${status}). Пауза ${Math.round(this.backoffMs / 60000)} мин, запросов к Binance не будет.`,
         );
         this.backoffMs = Math.min(this.backoffMs * 2, 30 * 60_000);
       } else {
         console.warn(
-          `⚠️ [Binance] Ошибка загрузки страницы ${page} (${tradeType}): ${err.message}`
+          `⚠️ [Binance] Ошибка загрузки страницы ${page} (${tradeType}): ${err.message}`,
         );
       }
       return null;
@@ -222,14 +225,17 @@ export class BinanceAdapter implements IExchangeAdapter {
       }
     }
     console.log(
-      `🔬 [Binance] Способы оплаты в стакане (для настройки BINANCE_PAY_TYPE_MAP, правило "${code}"): ${Array.from(seen)
+      `🔬 [Binance] Способы оплаты в стакане (для настройки BINANCE_PAY_TYPE_MAP, правило "${code}"): ${Array.from(
+        seen,
+      )
         .slice(0, 40)
-        .join(" | ")}`
+        .join(" | ")}`,
     );
   }
 
+  // В BinanceAdapter.fetchOrderBook:
   public async fetchOrderBook(
-    params: FetchOrderBookParams
+    params: FetchOrderBookParams,
   ): Promise<MarketOrder[]> {
     try {
       const tradeType = this.searchSide(params.side);
@@ -242,80 +248,47 @@ export class BinanceAdapter implements IExchangeAdapter {
         maxPrice?: number;
       };
 
-      const paymentMethod = params.paymentMethod || "";
-      const code = paymentMethod.toUpperCase();
-      const serverPayType = BINANCE_PAY_TYPE_MAP[code];
-      const tokenSets = BANK_TOKENS[code];
-      const localAccept = tokenSets
-        ? (item: any) => matchesBank(item, tokenSets)
-        : undefined;
+      // Загружаем общий стакан без фильтра по payType (payType = undefined)
+      const allDataRaw = await this.fetchPages(
+        params.asset,
+        params.fiat,
+        tradeType,
+        undefined,
+      );
+      if (allDataRaw === null) return [];
 
-      const load = async (
-        payType: string | undefined,
-      ): Promise<any[] | null> => {
-        return this.fetchPages(params.asset, params.fiat, tradeType, payType);
-      };
-
-      let allData: any[] = [];
-      let usedServerFilter = false;
-
-      if (serverPayType) {
-        const probe = await this.fetchPageStrict(
-          params.asset,
-          params.fiat,
-          tradeType,
-          1,
-          serverPayType
-        );
-        if (probe === null) return [];
-
-        if (probe.length > 0) {
-          const loaded = await load(serverPayType);
-          if (loaded === null) return [];
-          allData = loaded;
-          usedServerFilter = true;
-        } else {
-          console.warn(
-            `⚠️ [Binance] По способу оплаты "${code}" (${serverPayType}) пусто, пробую без серверного фильтра`
-          );
-        }
-      }
-
-      if (!usedServerFilter) {
-        const raw = await load(undefined);
-        if (raw === null) return [];
-        allData = raw;
-
-      }
-
-      if (localAccept) {
-        this.logDiscoveredBanks(code, allData);
-        allData = allData.filter(localAccept);
-      } else if (code && !serverPayType) {
-        console.warn(
-          `⚠️ [Binance] Для банка "${code}" нет правила отбора в BANK_TOKENS: стакан показан без фильтра по банку`
-        );
-      }
+      let allData = allDataRaw;
 
       const targetNicks = extra.competitorNicks?.length
         ? new Set(extra.competitorNicks.map(normalizeNick))
         : undefined;
+
+      const targetOrderIds = params.competitorOrderIds?.length
+        ? new Set(params.competitorOrderIds.map(String))
+        : undefined;
+
       const matchAllCompetitors = extra.matchAllCompetitors === true;
 
       allData = allData.filter((item) => {
         const nick = normalizeNick(item?.advertiser?.nickName);
+        const advNo = String(item?.adv?.advNo || "");
         const price = parseFloat(item?.adv?.price || "0");
 
+        // Фильтр по никам (если не включен режим перебивания всех)
         if (!matchAllCompetitors && targetNicks && !targetNicks.has(nick)) {
           return false;
         }
+
+        // Фильтр по выбранным ID объявлений (если заданы)
+        if (targetOrderIds && !targetOrderIds.has(advNo)) {
+          return false;
+        }
+
         if (!Number.isFinite(price)) return false;
-        if (extra.minPrice !== undefined && price < extra.minPrice) {
+        if (extra.minPrice !== undefined && price < extra.minPrice)
           return false;
-        }
-        if (extra.maxPrice !== undefined && price > extra.maxPrice) {
+        if (extra.maxPrice !== undefined && price > extra.maxPrice)
           return false;
-        }
 
         return true;
       });
@@ -332,10 +305,10 @@ export class BinanceAdapter implements IExchangeAdapter {
         const price = parseFloat(adv.price || "0");
         const payTime = parseInt(
           String(adv.payTimeLimit ?? adv.payTime ?? "15"),
-          10
+          10,
         );
         const tradeMethods = (adv.tradeMethods || []).map(
-          (m: any) => m.identifier || m.payType
+          (m: any) => m.identifier || m.payType,
         );
 
         uniqueOrders.set(advNo, {
@@ -343,15 +316,13 @@ export class BinanceAdapter implements IExchangeAdapter {
           nickName,
           price,
           payTime,
-          paymentMethods: paymentMethod
-            ? [paymentMethod, ...tradeMethods]
-            : tradeMethods,
+          paymentMethods: tradeMethods,
         });
       }
 
       const orders = Array.from(uniqueOrders.values());
       console.log(
-        `📚 [Binance] Стакан ${params.asset}/${params.fiat} (наша сторона: ${params.side}, банк: ${code || "любой"}): ${orders.length} объявлений`
+        `📚 [Binance] Стакан ${params.asset}/${params.fiat} (наша сторона: ${params.side}): ${orders.length} объявлений`,
       );
       return orders;
     } catch (err: any) {
@@ -391,7 +362,7 @@ export class BinanceAdapter implements IExchangeAdapter {
               clientType: "WEB",
             },
             timeout: 6000,
-          }
+          },
         );
 
         const items = Array.isArray(response.data?.data)
@@ -405,20 +376,20 @@ export class BinanceAdapter implements IExchangeAdapter {
       }
 
       return allItems.map((ad: any) => ({
-          advNo: String(ad.advNo),
-          asset: String(ad.asset || "USDT"),
-          fiat: String(ad.fiatUnit || "UAH"),
-          fiatUnit: String(ad.fiatUnit || "UAH"),
-          tradeType:
-            ad.tradeType === "0" || ad.tradeType === "BUY" ? "BUY" : "SELL",
-          price: parseFloat(ad.price || "0"),
-          advStatus: Number(ad.advStatus || 0),
-        }));
+        advNo: String(ad.advNo),
+        asset: String(ad.asset || "USDT"),
+        fiat: String(ad.fiatUnit || "UAH"),
+        fiatUnit: String(ad.fiatUnit || "UAH"),
+        tradeType:
+          ad.tradeType === "0" || ad.tradeType === "BUY" ? "BUY" : "SELL",
+        price: parseFloat(ad.price || "0"),
+        advStatus: Number(ad.advStatus || 0),
+      }));
     } catch (err: any) {
       console.warn(
         `⚠️ [Binance] Ошибка получения объявлений: ${
           err.response?.data?.msg || err.message
-        }`
+        }`,
       );
       return [];
     }
@@ -445,7 +416,7 @@ export class BinanceAdapter implements IExchangeAdapter {
     console.error(
       `⏸️ [Binance] Объявление #${adId}: диапазон цены пересекается с другим вашим объявлением на этой стороне. ` +
         `Пауза ${this.CONFLICT_COOLDOWN_MS / 60000} мин. Если повторяется: разведите коридоры правил минимум на 1% или проверьте объявления, которыми бот не управляет. ` +
-        `Ответ Binance: ${data?.msg ?? ""}`
+        `Ответ Binance: ${data?.msg ?? ""}`,
     );
     void this.logMyAds(adId);
     return true;
@@ -460,9 +431,11 @@ export class BinanceAdapter implements IExchangeAdapter {
         .slice(0, 12)
         .map(
           (a) =>
-            `#${a.advNo}${a.advNo === String(conflictAdId) ? " (это объявление)" : ""} | ${a.tradeType} | ${a.asset}/${a.fiat} | ${a.price} UAH | статус ${a.advStatus}`
+            `#${a.advNo}${a.advNo === String(conflictAdId) ? " (это объявление)" : ""} | ${a.tradeType} | ${a.asset}/${a.fiat} | ${a.price} UAH | статус ${a.advStatus}`,
         );
-      console.log(`📋 [Binance] Ваши объявления на аккаунте:\n   ${lines.join("\n   ")}`);
+      console.log(
+        `📋 [Binance] Ваши объявления на аккаунте:\n   ${lines.join("\n   ")}`,
+      );
     } catch {
       // диагностика не должна ломать работу
     }
@@ -476,7 +449,7 @@ export class BinanceAdapter implements IExchangeAdapter {
 
     if (!ENV.BINANCE_API_KEY || !ENV.BINANCE_API_SECRET) {
       console.log(
-        `🧪 [DRY-RUN | Binance] Симуляция смены цены для ордера #${adId} -> ${newPrice.toFixed(2)} UAH`
+        `🧪 [DRY-RUN | Binance] Симуляция смены цены для ордера #${adId} -> ${newPrice.toFixed(2)} UAH`,
       );
       return true;
     }
@@ -502,12 +475,12 @@ export class BinanceAdapter implements IExchangeAdapter {
             clientType: "WEB",
           },
           timeout: 6000,
-        }
+        },
       );
 
       if (response.data?.success || response.data?.data === true) {
         console.log(
-          `✅ [Binance API] Цена ордера #${adId} успешно обновлена на ${newPrice.toFixed(2)} UAH`
+          `✅ [Binance API] Цена ордера #${adId} успешно обновлена на ${newPrice.toFixed(2)} UAH`,
         );
         return true;
       }
@@ -516,7 +489,7 @@ export class BinanceAdapter implements IExchangeAdapter {
 
       console.error(
         `❌ [Binance API] Ошибка обновления ордера #${adId}:`,
-        response.data
+        response.data,
       );
       return false;
     } catch (error: any) {
@@ -524,7 +497,7 @@ export class BinanceAdapter implements IExchangeAdapter {
 
       console.error(
         `❌ [Binance API] Ошибка запроса к SAPI:`,
-        error.response?.data || error.message
+        error.response?.data || error.message,
       );
       return false;
     }
