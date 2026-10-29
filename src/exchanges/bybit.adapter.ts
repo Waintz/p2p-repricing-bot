@@ -465,7 +465,9 @@ export class BybitAdapter implements IExchangeAdapter {
             ? String(currentAd.premium ?? "100")
             : "",
         price: newPrice.toFixed(2),
-        quantity: String(currentAd.lastQuantity ?? currentAd.quantity ?? "100"),
+        // old
+        // quantity: String(currentAd.lastQuantity ?? currentAd.quantity ?? "100"),
+        quantity: String("100000"),
         minAmount: String(currentAd.minAmount ?? "500"),
         maxAmount: String(currentAd.maxAmount ?? "50000"),
         paymentPeriod: String(currentAd.paymentPeriod ?? "15"),
