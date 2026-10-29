@@ -3,6 +3,7 @@ import crypto from "crypto";
 import { IExchangeAdapter, FetchOrderBookParams } from "./exchange.interface";
 import { MarketOrder } from "../engine/math";
 import { ENV } from "../config/env";
+import { bot } from "../bot/bot";
 
 export interface BinanceMyAd {
   advNo: string;
@@ -84,7 +85,10 @@ export class BinanceAdapter implements IExchangeAdapter {
   private readonly MAX_SCAN_PAGES = 5;
 
   private blockedUntil = 0;
-  private backoffMs = 120_000;
+  private backoffMs = 300_000;
+  private readonly BASE_BACKOFF_MS = 280_000;
+  private readonly MAX_BACKOFF_MS: number = 20 * 60_000;
+  private isCurrentlyBlocked = false;
 
   private pageCache = new Map<string, { ts: number; items: any[] }>();
   private readonly PAGE_CACHE_TTL_MS = 10_000;
@@ -99,6 +103,17 @@ export class BinanceAdapter implements IExchangeAdapter {
    */
   private searchSide(ourSide: "BUY" | "SELL"): "BUY" | "SELL" {
     return ourSide === "SELL" ? "BUY" : "SELL";
+  }
+
+  private async notifyAdmin(message: string) {
+    if (!ENV.ADMIN_TG_ID) return;
+    try {
+      await bot.api.sendMessage(ENV.ADMIN_TG_ID, message, {
+        parse_mode: "HTML",
+      });
+    } catch (err: any) {
+      console.error("⚠️ [Telegram Notification Error]:", err?.message);
+    }
   }
 
   /**
@@ -119,6 +134,13 @@ export class BinanceAdapter implements IExchangeAdapter {
     }
 
     if (Date.now() < this.blockedUntil) return null;
+
+    if (this.isCurrentlyBlocked && Date.now() >= this.blockedUntil) {
+      this.isCurrentlyBlocked = false;
+      const unbanMsg = `✅ <b>[Binance API] Доступ восстановлен!</b>\nПауза завершена, слежение за ордерами возобновлено.`;
+      console.log(`✅ [Binance] Кулдаун истек, доступ восстановлен.`);
+      void this.notifyAdmin(unbanMsg);
+    }
 
     try {
       const response = await axios.post(
@@ -144,7 +166,7 @@ export class BinanceAdapter implements IExchangeAdapter {
         },
       );
 
-      this.backoffMs = 120_000;
+      this.backoffMs = this.BASE_BACKOFF_MS;
       const items: any[] = Array.isArray(response.data?.data)
         ? response.data.data
         : [];
@@ -159,12 +181,32 @@ export class BinanceAdapter implements IExchangeAdapter {
       return items;
     } catch (err: any) {
       const status = err.response?.status;
-      if (status === 429 || status === 418) {
-        this.blockedUntil = Date.now() + this.backoffMs;
-        console.error(
-          `🛑 [Binance] Лимит запросов (HTTP ${status}). Пауза ${Math.round(this.backoffMs / 60000)} мин, запросов к Binance не будет.`,
-        );
-        this.backoffMs = Math.min(this.backoffMs * 2, 30 * 60_000);
+      const errCode = err.code;
+      if (
+        status === 429 ||
+        status === 418 ||
+        errCode === "ECONNRESET" ||
+        !status
+      ) {
+        if (Date.now() >= this.blockedUntil) {
+          this.blockedUntil = Date.now() + this.backoffMs;
+          this.isCurrentlyBlocked = true;
+
+          const pauseSeconds = Math.round(this.backoffMs / 1000);
+          const pauseMinutes = (pauseSeconds / 60).toFixed(1);
+
+          const alertMsg =
+            `🛑 <b>[Binance API] Лимит запросов (HTTP 429)!</b>\n\n` +
+            `Биржа временно подбанила IP. Слежение за объявлениями Binance **приостановлено на ${pauseMinutes} мин** (${pauseSeconds} сек).\n` +
+            `<i>Бот автоматически возобновит работу после истечения кулдауна.</i>`;
+
+          console.error(
+            `🛑 [Binance БАН] Пауза на ${pauseSeconds}с (${pauseMinutes} мин).`,
+          );
+          void this.notifyAdmin(alertMsg);
+
+          this.backoffMs = Math.min(this.backoffMs * 2, this.MAX_BACKOFF_MS);
+        }
       } else {
         console.warn(
           `⚠️ [Binance] Ошибка загрузки страницы ${page} (${tradeType}): ${err.message}`,
