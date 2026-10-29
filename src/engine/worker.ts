@@ -2,6 +2,7 @@ import { prisma } from "../database/prisma";
 import { calculateNewPrice, RuleConfig, MarketOrder } from "./math";
 import { BybitAdapter } from "../exchanges/bybit.adapter";
 import { BinanceAdapter } from "../exchanges/binance.adapter";
+import { OkxAdapter } from "../exchanges/okx.adapter";
 import { IExchangeAdapter } from "../exchanges/exchange.interface";
 
 type Coolable = IExchangeAdapter & {
@@ -16,6 +17,7 @@ export class RepricingWorker {
   private adapters: Record<string, IExchangeAdapter> = {
     BYBIT: new BybitAdapter(),
     BINANCE: new BinanceAdapter(),
+    OKX: new OkxAdapter(),
   };
 
   public start(intervalMs = 15000) {
@@ -170,9 +172,13 @@ export class RepricingWorker {
         const updated = await adapter.updateAdPrice(String(rule.adId), safeTargetPrice);
 
         if (updated) {
+          const replacementAdId = adapter.getReplacementAdId?.(String(rule.adId));
           await prisma.adRule.update({
             where: { id: rule.id },
-            data: { currentPrice: safeTargetPrice },
+            data: {
+              currentPrice: safeTargetPrice,
+              ...(replacementAdId ? { adId: replacementAdId } : {}),
+            },
           });
         }
       } catch (error: any) {

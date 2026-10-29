@@ -25,4 +25,10 @@ export interface IExchangeAdapter {
    * Возвращает true, если цена успешно изменена
    */
   updateAdPrice(adId: string, newPrice: number): Promise<boolean>;
+
+  /**
+   * Some exchanges replace an ad when its price is updated. The worker uses
+   * this optional hook to persist the replacement ID.
+   */
+  getReplacementAdId?(adId: string): string | undefined;
 }

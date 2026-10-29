@@ -4,9 +4,11 @@ import { prisma } from "../database/prisma";
 import { EXCHANGES, PAYMENT_METHODS, PAY_TIMES } from "../config/constants";
 import { BybitAdapter } from "../exchanges/bybit.adapter";
 import { BinanceAdapter } from "../exchanges/binance.adapter";
+import { OkxAdapter } from "../exchanges/okx.adapter";
 
 const bybitAdapter = new BybitAdapter();
 const binanceAdapter = new BinanceAdapter();
+const okxAdapter = new OkxAdapter();
 
 interface SessionData {
   awaitingInput?: {
@@ -171,6 +173,8 @@ export async function showRuleCard(
       `📋 Выбрать ордер из Binance`,
       `fetch_binance_ads:${rule.id}`,
     ).row();
+  } else if (rule.exchange === "OKX") {
+    kb.text(`📋 Выбрать ордер из OKX`, `fetch_okx_ads:${rule.id}`).row();
   }
 
   kb.text(`🆔 Ввести ID вручную`, `ask_input:AD_ID:${rule.id}`)
@@ -243,6 +247,28 @@ bot.callbackQuery(/^fetch_binance_ads:(\d+)$/, async (ctx) => {
 
   await ctx.editMessageText(
     "📋 <b>Выберите объявление из Binance:</b>\n\nНажмите на нужный ордер для привязки:",
+    { parse_mode: "HTML", reply_markup: kb },
+  );
+});
+
+bot.callbackQuery(/^fetch_okx_ads:(\d+)$/, async (ctx) => {
+  const ruleId = Number(ctx.match[1]);
+  await ctx.answerCallbackQuery({ text: "Загружаю объявления из OKX..." });
+  const ads = await okxAdapter.fetchMyAds();
+  if (ads.length === 0) {
+    await ctx.reply("⚠️ Объявления OKX не найдены или API-ключи не имеют доступа к P2P.");
+    return;
+  }
+  const kb = new InlineKeyboard();
+  for (const ad of ads) {
+    kb.text(
+      `#${ad.adId.slice(-8)} | ${ad.side === "SELL" ? "ПРОДАЖА" : "ПОКУПКА"} | ${ad.cryptoCurrency} | ${ad.unitPrice}`,
+      `set_ad_id:${ruleId}:${ad.adId}`,
+    ).row();
+  }
+  kb.text("⬅️ Назад к карточке", `rule:${ruleId}`);
+  await ctx.editMessageText(
+    "📋 <b>Выберите объявление из OKX:</b>",
     { parse_mode: "HTML", reply_markup: kb },
   );
 });
@@ -517,7 +543,12 @@ bot.callbackQuery(/^select_comp_ads:(\d+):(\d+)$/, async (ctx) => {
   }
 
   const exchangeName = rule.exchange.toUpperCase();
-  const adapter = exchangeName === "BINANCE" ? binanceAdapter : bybitAdapter;
+  const adapter =
+    exchangeName === "BINANCE"
+      ? binanceAdapter
+      : exchangeName === "OKX"
+        ? okxAdapter
+        : bybitAdapter;
 
   await ctx.answerCallbackQuery({ text: `Загружаю объявления ${exchangeName}...` });
 

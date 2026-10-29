@@ -1,4 +1,4 @@
-export const EXCHANGES = ["BINANCE", "BYBIT"] as const;
+export const EXCHANGES = ["BINANCE", "BYBIT", "OKX"] as const;
 export type ExchangeType = (typeof EXCHANGES)[number];
 
 export const ASSETS = ["USDT", "USDC"] as const;
