@@ -72,7 +72,6 @@ export class RepricingWorker {
       rule.asset,
       rule.fiat,
       rule.side,
-      rule.paymentMethod,
       rule.matchAllCompetitors ? "ALL" : "NICKS",
       ...nicks,
       ...rule.competitors
@@ -125,6 +124,33 @@ export class RepricingWorker {
           continue;
         }
 
+        // Синхронизация рассинхрона: находим наше объявление прямо в полученном стакане
+        const myOrderInBook = orderBook.find(
+          (o) => String(o.orderId).trim() === String(rule.adId).trim()
+        );
+
+        let actualExchangePrice = rule.currentPrice ? Number(rule.currentPrice) : null;
+
+        if (myOrderInBook && Number.isFinite(myOrderInBook.price)) {
+          actualExchangePrice = Number(myOrderInBook.price);
+          
+          // Если реальная цена на бирже отличается от записанной в базе, обновляем БД
+          if (
+            rule.currentPrice === null ||
+            Math.round(Number(rule.currentPrice) * 100) !== Math.round(actualExchangePrice * 100)
+          ) {
+            console.log(
+              `🔄 [${rule.exchange} | ${rule.name}] Обнаружен рассинхрон! В БД: ${
+                rule.currentPrice ?? "—"
+              }, На бирже: ${actualExchangePrice.toFixed(2)} UAH. Обновляем БД.`
+            );
+            await prisma.adRule.update({
+              where: { id: rule.id },
+              data: { currentPrice: actualExchangePrice },
+            });
+          }
+        }
+
         const allowedPayTimes: number[] = JSON.parse(
           rule.allowedPayTimes || "[15,30,45,60]"
         );
@@ -135,7 +161,7 @@ export class RepricingWorker {
           step: rule.step,
           minPrice: rule.minPrice,
           maxPrice: rule.maxPrice,
-          currentPrice: rule.currentPrice,
+          currentPrice: actualExchangePrice,
           allowedPayTimes,
           matchAllCompetitors: rule.matchAllCompetitors === true,
           competitors: rule.competitors.map((c: any) => ({
@@ -147,24 +173,24 @@ export class RepricingWorker {
         };
 
         const result = calculateNewPrice(orderBook, mathConfig);
-        const currentPrice = rule.currentPrice ? Number(rule.currentPrice) : null;
         const safeTargetPrice = this.applyBinanceSafetyLimit(rules, rule, result.targetPrice);
 
         if (safeTargetPrice === null) continue;
 
+        // Сравниваем актуальную цену с биржи с новой целевой ценой
         if (
-          currentPrice !== null &&
-          Number.isFinite(currentPrice) &&
-          Math.round(currentPrice * 100) === Math.round(safeTargetPrice * 100)
+          actualExchangePrice !== null &&
+          Number.isFinite(actualExchangePrice) &&
+          Math.round(actualExchangePrice * 100) === Math.round(safeTargetPrice * 100)
         ) {
           console.log(
-            `⏸️ [${rule.exchange} | ${rule.name}] Цена актуальна: ${currentPrice.toFixed(2)} UAH (${result.reason})`
+            `⏸️ [${rule.exchange} | ${rule.name}] Цена актуальна: ${actualExchangePrice.toFixed(2)} UAH (${result.reason})`
           );
           continue;
         }
 
         console.log(
-          `🔄 [${rule.exchange} | ${rule.name}] ${currentPrice ? currentPrice.toFixed(2) : "—"} -> ${safeTargetPrice.toFixed(2)} UAH (${result.reason})`
+          `🔄 [${rule.exchange} | ${rule.name}] ${actualExchangePrice ? actualExchangePrice.toFixed(2) : "—"} -> ${safeTargetPrice.toFixed(2)} UAH (${result.reason})`
         );
 
         const updated = await adapter.updateAdPrice(String(rule.adId), safeTargetPrice);
