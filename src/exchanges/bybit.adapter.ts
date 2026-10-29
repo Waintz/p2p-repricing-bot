@@ -29,20 +29,6 @@ function normalizeNick(nick: string): string {
     .toLowerCase();
 }
 
-export const BYBIT_PAYMENT_MAP: Record<string, string[]> = {
-  MONOBANK_CARD: ["43", "659"],
-  MONOBANK_IBAN: ["659", "43"],
-  PRIVAT_CARD: ["60"],
-  PRIVAT_IBAN: ["60"],
-  ABANK_CARD: ["1"],
-  PUMB_CARD: ["61"],
-  BANK_TRANSFER: ["14"],
-  SENSE_BANK: ["477"],
-  OTP_BANK: ["395"],
-  RAIFFEISEN_BANK: ["44"],
-  OSCHAD_BANK: ["45"],
-};
-
 export class BybitAdapter implements IExchangeAdapter {
   public readonly name = "BYBIT";
 
@@ -95,7 +81,6 @@ export class BybitAdapter implements IExchangeAdapter {
     return (Date.now() + this.timeOffset).toString();
   }
 
-  // Функция для строгого получения страницы с резервным URL с размеров в 300 единиц
   private async fetchPageStrict(
     asset: string,
     fiat: string,
@@ -139,7 +124,6 @@ export class BybitAdapter implements IExchangeAdapter {
     }
   }
 
-  // получаем самого сильного конкурента
   public async fetchOrderBook(
     params: FetchOrderBookParams,
   ): Promise<MarketOrder[]> {
@@ -181,8 +165,6 @@ export class BybitAdapter implements IExchangeAdapter {
     let allRawItems: any[] = [];
     const seenOrderIds = new Set<string>();
 
-    // Загружаем все доступные страницы: лучший конкурент может находиться
-    // не на первой странице.
     for (let page = 1; page <= this.MAX_SCAN_PAGES; page++) {
       const items = await this.fetchPageStrict(
         params.asset,
@@ -216,9 +198,6 @@ export class BybitAdapter implements IExchangeAdapter {
     );
 
     const mappedOrders: MarketOrder[] = allRawItems.map((item: any) => {
-      const rawPayments: string[] = (item.payments || []).map(String);
-      const mappedMethods: string[] = [...rawPayments];
-
       return {
         orderId: String(item.id),
         nickName: String(item.nickName || ""),
@@ -227,7 +206,7 @@ export class BybitAdapter implements IExchangeAdapter {
           String(item.paymentPeriod ?? item.payTime ?? "15"),
           10,
         ),
-        paymentMethods: mappedMethods,
+        paymentMethods: [],
       };
     });
 
@@ -465,8 +444,6 @@ export class BybitAdapter implements IExchangeAdapter {
             ? String(currentAd.premium ?? "100")
             : "",
         price: newPrice.toFixed(2),
-        // old
-        // quantity: String(currentAd.lastQuantity ?? currentAd.quantity ?? "100"),
         quantity: String("100000"),
         minAmount: String(currentAd.minAmount ?? "500"),
         maxAmount: String(currentAd.maxAmount ?? "50000"),

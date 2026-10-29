@@ -24,57 +24,6 @@ function normalizeNick(nick: string): string {
     .toLowerCase();
 }
 
-/**
- * Банки (коды из config/constants.ts) -> идентификатор Binance для серверного
- * фильтра payTypes. Эти значения относятся только к Binance API.
- */
-const BINANCE_PAY_TYPE_MAP: Record<string, string> = {
-  MONOBANK_CARD: "Monobank",
-  MONOBANK_IBAN: "Monobankiban",
-  PRIVAT_CARD: "PrivatBank",
-  PRIVAT_IBAN: "PrivatBankIBAN",
-  PUMB_CARD: "PUMBBank",
-  PUMB_IBAN: "PUMBIBAN",
-  ABANK_CARD: "ABank",
-  ABANK_IBAN: "AbankIBAN",
-  RAIFFEISEN_BANK: "RaiffeisenBankAval",
-  OSCHAD_BANK: "Oschadbank",
-  SENSE_BANK: "SenseSuperApp",
-};
-
-/**
- * Локальный отбор объявлений по банку: в тексте способов оплаты объявления
- * (идентификатор + название) должны встретиться ВСЕ слова хотя бы из одного набора.
- */
-const BANK_TOKENS: Record<string, string[][]> = {
-  MONOBANK_CARD: [["monobank", "card"]],
-  MONOBANK_IBAN: [["monobank", "iban"]],
-  PRIVAT_CARD: [
-    ["privat", "card"],
-    ["privat", "univer"],
-  ],
-  PRIVAT_IBAN: [["privat", "iban"]],
-  ABANK_CARD: [["abank"], ["a-bank"], ["a bank"]],
-  ABANK_IBAN: [["abankiban"], ["a-bankiban"], ["a bank iban"]],
-  PUMB_CARD: [["pumbbank"]],
-  PUMB_IBAN: [["pumbiban"]],
-  SENSE_BANK: [["sensesuperapp"]],
-  OTP_BANK: [["otp"]],
-  RAIFFEISEN_BANK: [["raiffeisen"], ["raif"]],
-  OSCHAD_BANK: [["oschadbank"]],
-  BANK_TRANSFER: [["bank transfer"], ["banktransfer"]],
-};
-
-function matchesBank(item: any, tokenSets: string[][]): boolean {
-  const methods: any[] = item?.adv?.tradeMethods || [];
-  return methods.some((m) => {
-    const text = `${m?.identifier ?? ""} ${m?.tradeMethodName ?? ""} ${
-      m?.payType ?? ""
-    }`.toLowerCase();
-    return tokenSets.some((tokens) => tokens.every((t) => text.includes(t)));
-  });
-}
-
 export class BinanceAdapter implements IExchangeAdapter {
   public readonly name = "BINANCE";
 
@@ -85,15 +34,13 @@ export class BinanceAdapter implements IExchangeAdapter {
   private readonly MAX_SCAN_PAGES = 5;
 
   private blockedUntil = 0;
-  private backoffMs = 300_000;
-  private readonly BASE_BACKOFF_MS = 280_000;
+  private readonly BASE_BACKOFF_MS = 280_000; // ~4.6 минуты (перекрывает 270с бана)
+  private backoffMs = 280_000;
   private readonly MAX_BACKOFF_MS: number = 20 * 60_000;
   private isCurrentlyBlocked = false;
 
   private pageCache = new Map<string, { ts: number; items: any[] }>();
   private readonly PAGE_CACHE_TTL_MS = 10_000;
-
-  private discoveredBanks = new Set<string>();
 
   /**
    * В публичном поиске Binance tradeType — это сторона ПОЛЬЗОВАТЕЛЯ:
@@ -117,17 +64,15 @@ export class BinanceAdapter implements IExchangeAdapter {
   }
 
   /**
-   * Одна страница стакана. Возвращает null при ошибке или лимите запросов
-   * (чтобы отличать сбой от конца стакана, где страница просто пустая).
+   * Одна страница стакана. Возвращает null при ошибке или лимите запросов.
    */
   private async fetchPageStrict(
     asset: string,
     fiat: string,
     tradeType: "BUY" | "SELL",
-    page: number,
-    payType?: string,
+    page: number
   ): Promise<any[] | null> {
-    const cacheKey = [asset, fiat, tradeType, payType ?? "*", page].join("|");
+    const cacheKey = [asset, fiat, tradeType, page].join("|");
     const cached = this.pageCache.get(cacheKey);
     if (cached && Date.now() - cached.ts < this.PAGE_CACHE_TTL_MS) {
       return cached.items;
@@ -150,7 +95,7 @@ export class BinanceAdapter implements IExchangeAdapter {
           fiat,
           merchantCheck: false,
           page,
-          payTypes: payType ? [payType] : [],
+          payTypes: [], // Без фильтрации по банкам на стороне API
           publisherType: null,
           rows: 60,
           tradeType,
@@ -163,7 +108,7 @@ export class BinanceAdapter implements IExchangeAdapter {
               "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
           },
           timeout: 8000,
-        },
+        }
       );
 
       this.backoffMs = this.BASE_BACKOFF_MS;
@@ -197,11 +142,11 @@ export class BinanceAdapter implements IExchangeAdapter {
 
           const alertMsg =
             `🛑 <b>[Binance API] Лимит запросов (HTTP 429)!</b>\n\n` +
-            `Биржа временно подбанила IP. Слежение за объявлениями Binance **приостановлено на ${pauseMinutes} мин** (${pauseSeconds} сек).\n` +
+            `Биржа временно подбанила IP. Слежение за объявлениями Binance <b>приостановлено на ${pauseMinutes} мин</b> (${pauseSeconds} сек).\n` +
             `<i>Бот автоматически возобновит работу после истечения кулдауна.</i>`;
 
           console.error(
-            `🛑 [Binance БАН] Пауза на ${pauseSeconds}с (${pauseMinutes} мин).`,
+            `🛑 [Binance БАН] Пауза на ${pauseSeconds}с (${pauseMinutes} мин).`
           );
           void this.notifyAdmin(alertMsg);
 
@@ -209,7 +154,7 @@ export class BinanceAdapter implements IExchangeAdapter {
         }
       } else {
         console.warn(
-          `⚠️ [Binance] Ошибка загрузки страницы ${page} (${tradeType}): ${err.message}`,
+          `⚠️ [Binance] Ошибка загрузки страницы ${page} (${tradeType}): ${err.message}`
         );
       }
       return null;
@@ -217,27 +162,18 @@ export class BinanceAdapter implements IExchangeAdapter {
   }
 
   /**
-   * Загружает страницы стакана до конца доступных данных или лимита.
-   * Нельзя останавливаться после первого найденного конкурента: следующий
-   * конкурент может иметь более подходящую цену.
+   * Загружает страницы стакана до конца доступных данных или лимита MAX_SCAN_PAGES.
    */
   private async fetchPages(
     asset: string,
     fiat: string,
-    tradeType: "BUY" | "SELL",
-    payType: string | undefined,
+    tradeType: "BUY" | "SELL"
   ): Promise<any[] | null> {
     const collected: any[] = [];
     const seenAdvNos = new Set<string>();
 
     for (let page = 1; page <= this.MAX_SCAN_PAGES; page++) {
-      const items = await this.fetchPageStrict(
-        asset,
-        fiat,
-        tradeType,
-        page,
-        payType,
-      );
+      const items = await this.fetchPageStrict(asset, fiat, tradeType, page);
 
       if (items === null) return null;
       if (items.length === 0) break;
@@ -258,28 +194,8 @@ export class BinanceAdapter implements IExchangeAdapter {
     return collected;
   }
 
-  private logDiscoveredBanks(code: string, items: any[]) {
-    if (this.discoveredBanks.has(code)) return;
-    this.discoveredBanks.add(code);
-
-    const seen = new Set<string>();
-    for (const item of items) {
-      for (const m of item?.adv?.tradeMethods || []) {
-        seen.add(`${m?.identifier}=${m?.tradeMethodName}`);
-      }
-    }
-    console.log(
-      `🔬 [Binance] Способы оплаты в стакане (для настройки BINANCE_PAY_TYPE_MAP, правило "${code}"): ${Array.from(
-        seen,
-      )
-        .slice(0, 40)
-        .join(" | ")}`,
-    );
-  }
-
-  // В BinanceAdapter.fetchOrderBook:
   public async fetchOrderBook(
-    params: FetchOrderBookParams,
+    params: FetchOrderBookParams
   ): Promise<MarketOrder[]> {
     try {
       const tradeType = this.searchSide(params.side);
@@ -292,12 +208,13 @@ export class BinanceAdapter implements IExchangeAdapter {
         maxPrice?: number;
       };
 
-      // Загружаем общий стакан без фильтра по payType (payType = undefined)
+      const assetUpper = params.asset.toUpperCase();
+      const fiatUpper = params.fiat.toUpperCase();
+
       const allDataRaw = await this.fetchPages(
-        params.asset,
-        params.fiat,
-        tradeType,
-        undefined,
+        assetUpper,
+        fiatUpper,
+        tradeType
       );
       if (allDataRaw === null) return [];
 
@@ -323,7 +240,7 @@ export class BinanceAdapter implements IExchangeAdapter {
           return false;
         }
 
-        // Фильтр по выбранным ID объявлений (если заданы)
+        // Фильтр по конкретным выбранным ID объявлений (если заданы)
         if (targetOrderIds && !targetOrderIds.has(advNo)) {
           return false;
         }
@@ -349,10 +266,7 @@ export class BinanceAdapter implements IExchangeAdapter {
         const price = parseFloat(adv.price || "0");
         const payTime = parseInt(
           String(adv.payTimeLimit ?? adv.payTime ?? "15"),
-          10,
-        );
-        const tradeMethods = (adv.tradeMethods || []).map(
-          (m: any) => m.identifier || m.payType,
+          10
         );
 
         uniqueOrders.set(advNo, {
@@ -360,13 +274,13 @@ export class BinanceAdapter implements IExchangeAdapter {
           nickName,
           price,
           payTime,
-          paymentMethods: tradeMethods,
+          paymentMethods: [],
         });
       }
 
       const orders = Array.from(uniqueOrders.values());
       console.log(
-        `📚 [Binance] Стакан ${params.asset}/${params.fiat} (наша сторона: ${params.side}): ${orders.length} объявлений`,
+        `📚 [Binance] Стакан ${assetUpper}/${fiatUpper} (наша сторона: ${params.side}): ${orders.length} объявлений`
       );
       return orders;
     } catch (err: any) {
@@ -388,8 +302,8 @@ export class BinanceAdapter implements IExchangeAdapter {
     }
 
     try {
-      const timestamp = Date.now();
-      const queryString = `timestamp=${timestamp}`;
+      const timestamp = Date.now() - 1000;
+      const queryString = `timestamp=${timestamp}&recvWindow=60000`;
       const signature = this.signQueryString(queryString);
 
       const allItems: any[] = [];
@@ -406,7 +320,7 @@ export class BinanceAdapter implements IExchangeAdapter {
               clientType: "WEB",
             },
             timeout: 6000,
-          },
+          }
         );
 
         const items = Array.isArray(response.data?.data)
@@ -421,9 +335,9 @@ export class BinanceAdapter implements IExchangeAdapter {
 
       return allItems.map((ad: any) => ({
         advNo: String(ad.advNo),
-        asset: String(ad.asset || "USDT"),
-        fiat: String(ad.fiatUnit || "UAH"),
-        fiatUnit: String(ad.fiatUnit || "UAH"),
+        asset: String(ad.asset || "USDT").toUpperCase(),
+        fiat: String(ad.fiatUnit || "UAH").toUpperCase(),
+        fiatUnit: String(ad.fiatUnit || "UAH").toUpperCase(),
         tradeType:
           ad.tradeType === "0" || ad.tradeType === "BUY" ? "BUY" : "SELL",
         price: parseFloat(ad.price || "0"),
@@ -433,13 +347,12 @@ export class BinanceAdapter implements IExchangeAdapter {
       console.warn(
         `⚠️ [Binance] Ошибка получения объявлений: ${
           err.response?.data?.msg || err.message
-        }`,
+        }`
       );
       return [];
     }
   }
 
-  // Пауза для объявлений, которые Binance отклонил из-за пересечения ценовых диапазонов (код 187055)
   private adCooldown = new Map<string, number>();
   private readonly CONFLICT_COOLDOWN_MS = 60_000;
 
@@ -453,20 +366,18 @@ export class BinanceAdapter implements IExchangeAdapter {
     return true;
   }
 
-  // Возвращает true, если ошибка была конфликтом диапазонов и объявление поставлено на паузу
   private handleRangeConflict(adId: string, data: any): boolean {
     if (Number(data?.code) !== 187055) return false;
     this.adCooldown.set(String(adId), Date.now() + this.CONFLICT_COOLDOWN_MS);
     console.error(
       `⏸️ [Binance] Объявление #${adId}: диапазон цены пересекается с другим вашим объявлением на этой стороне. ` +
         `Пауза ${this.CONFLICT_COOLDOWN_MS / 60000} мин. Если повторяется: разведите коридоры правил минимум на 1% или проверьте объявления, которыми бот не управляет. ` +
-        `Ответ Binance: ${data?.msg ?? ""}`,
+        `Ответ Binance: ${data?.msg ?? ""}`
     );
     void this.logMyAds(adId);
     return true;
   }
 
-  // При конфликте показываем реальные объявления аккаунта, чтобы найти то, что мешает
   private async logMyAds(conflictAdId: string) {
     try {
       const ads = await this.fetchMyAds();
@@ -475,10 +386,10 @@ export class BinanceAdapter implements IExchangeAdapter {
         .slice(0, 12)
         .map(
           (a) =>
-            `#${a.advNo}${a.advNo === String(conflictAdId) ? " (это объявление)" : ""} | ${a.tradeType} | ${a.asset}/${a.fiat} | ${a.price} UAH | статус ${a.advStatus}`,
+            `#${a.advNo}${a.advNo === String(conflictAdId) ? " (это объявление)" : ""} | ${a.tradeType} | ${a.asset}/${a.fiat} | ${a.price} UAH | статус ${a.advStatus}`
         );
       console.log(
-        `📋 [Binance] Ваши объявления на аккаунте:\n   ${lines.join("\n   ")}`,
+        `📋 [Binance] Ваши объявления на аккаунте:\n   ${lines.join("\n   ")}`
       );
     } catch {
       // диагностика не должна ломать работу
@@ -493,14 +404,14 @@ export class BinanceAdapter implements IExchangeAdapter {
 
     if (!ENV.BINANCE_API_KEY || !ENV.BINANCE_API_SECRET) {
       console.log(
-        `🧪 [DRY-RUN | Binance] Симуляция смены цены для ордера #${adId} -> ${newPrice.toFixed(2)} UAH`,
+        `🧪 [DRY-RUN | Binance] Симуляция смены цены для ордера #${adId} -> ${newPrice.toFixed(2)} UAH`
       );
       return true;
     }
 
     try {
-      const timestamp = Date.now();
-      const queryString = `timestamp=${timestamp}`;
+      const timestamp = Date.now() - 1000;
+      const queryString = `timestamp=${timestamp}&recvWindow=60000`;
       const signature = this.signQueryString(queryString);
 
       const payload = {
@@ -519,12 +430,12 @@ export class BinanceAdapter implements IExchangeAdapter {
             clientType: "WEB",
           },
           timeout: 6000,
-        },
+        }
       );
 
       if (response.data?.success || response.data?.data === true) {
         console.log(
-          `✅ [Binance API] Цена ордера #${adId} успешно обновлена на ${newPrice.toFixed(2)} UAH`,
+          `✅ [Binance API] Цена ордера #${adId} успешно обновлена на ${newPrice.toFixed(2)} UAH`
         );
         return true;
       }
@@ -533,7 +444,7 @@ export class BinanceAdapter implements IExchangeAdapter {
 
       console.error(
         `❌ [Binance API] Ошибка обновления ордера #${adId}:`,
-        response.data,
+        response.data
       );
       return false;
     } catch (error: any) {
@@ -541,7 +452,7 @@ export class BinanceAdapter implements IExchangeAdapter {
 
       console.error(
         `❌ [Binance API] Ошибка запроса к SAPI:`,
-        error.response?.data || error.message,
+        error.response?.data || error.message
       );
       return false;
     }

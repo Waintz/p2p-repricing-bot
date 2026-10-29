@@ -1,7 +1,7 @@
 import { Bot, Context, InlineKeyboard, session, SessionFlavor } from "grammy";
 import { ENV } from "../config/env";
 import { prisma } from "../database/prisma";
-import { EXCHANGES, PAYMENT_METHODS, PAY_TIMES } from "../config/constants";
+import { EXCHANGES, PAY_TIMES } from "../config/constants";
 import { BybitAdapter } from "../exchanges/bybit.adapter";
 import { BinanceAdapter } from "../exchanges/binance.adapter";
 
@@ -112,8 +112,6 @@ export async function showRuleCard(
 
   const activeComps = rule.competitors.filter((c) => c.isEnabled).length;
   const payTimes: number[] = JSON.parse(rule.allowedPayTimes || "[]");
-  const payMethodLabel =
-    PAYMENT_METHODS[rule.paymentMethod] || rule.paymentMethod;
   const sideLabel = rule.side === "SELL" ? "Продажа (SELL)" : "Покупка (BUY)";
 
   const text =
@@ -123,13 +121,12 @@ export async function showRuleCard(
     `🆔 <b>ID ордера на бирже:</b> <code>${rule.adId || "Не указан"}</code>\n` +
     `🪙 <b>Валютная пара:</b> ${rule.asset} / ${rule.fiat}\n` +
     `🔄 <b>Тип:</b> ${sideLabel}\n` +
-    `💳 <b>Способ оплаты:</b> ${payMethodLabel}\n` +
     `━━━━━━━━━━━━━━━━━━━━\n` +
     `📏 <b>Общий шаг перебивания:</b> ${rule.step.toFixed(2)} грн\n` +
     `📉 <b>Мин. / Базовая цена:</b> ${rule.minPrice.toFixed(2)} грн\n` +
     `📈 <b>Макс. цена (потолок):</b> ${rule.maxPrice.toFixed(2)} грн\n` +
     `⏱ <b>Лимит времени оплаты:</b> ${payTimes.length ? payTimes.join(", ") + " мин" : "Не выбрано"}\n` +
-    `🎯 <b>Режим конкурентов:</b> ${rule.matchAllCompetitors ? "все объявления банка" : "только выбранные ники"}\n` +
+    `🎯 <b>Режим конкурентов:</b> ${rule.matchAllCompetitors ? "все объявления стакана" : "только выбранные ники"}\n` +
     `👥 <b>Конкуренты:</b> активных ${activeComps} из ${rule.competitors.length}\n` +
     `💰 <b>Текущая выставленная цена:</b> ${rule.currentPrice ? rule.currentPrice.toFixed(2) + " грн" : "—"}\n` +
     `━━━━━━━━━━━━━━━━━━━━\n` +
@@ -144,12 +141,10 @@ export async function showRuleCard(
     .text(`🪙 Валюта: ${rule.asset}`, `toggle_asset:${rule.id}`)
     .text(`🔄 Тип: ${rule.side}`, `toggle_side:${rule.id}`)
     .row()
-    .text(`💳 Банк: ${payMethodLabel}`, `menu_bank:${rule.id}`)
-    .row()
     .text(
       rule.matchAllCompetitors
-        ? "🎯 Все объявления банка: ВКЛ"
-        : "🎯 Все объявления банка: ВЫКЛ",
+        ? "🎯 Все объявления стакана: ВКЛ"
+        : "🎯 Все объявления стакана: ВЫКЛ",
       `toggle_all_comp:${rule.id}`,
     )
     .row()
@@ -197,7 +192,7 @@ bot.callbackQuery(/^fetch_bybit_ads:(\d+)$/, async (ctx) => {
 
   if (ads.length === 0) {
     await ctx.reply(
-      "⚠️ Объявления не найдены или не указаны валидные API-ключи Bybit в .env (нужен доступ P2P/OTC).",
+      "⚠️ Объявления не найдены или не указаны валидные API-ключи Bybit в .env.",
     );
     return;
   }
@@ -264,17 +259,6 @@ bot.command("start", async (ctx) => {
   await showMainMenu(ctx, false);
 });
 
-// bot.command("test", async (ctx) => {
-//   await bybitAdapter.test({
-//     asset: "USDT",
-//     fiat: "UAH",
-//     side: "BUY",
-//     competitorNicks: ["obmen_minyta", "ТурбоОбмен", "CashLogistik", "mria_trading"],
-//     maxPrice: 50,
-//     minPrice: 45,
-//   });
-// });
-
 bot.callbackQuery("main_menu", async (ctx) => {
   await ctx.answerCallbackQuery();
   await showMainMenu(ctx, true);
@@ -297,7 +281,7 @@ bot.callbackQuery(/^add_rule:(.+)$/, async (ctx) => {
       asset: "USDT",
       fiat: "UAH",
       side: "BUY",
-      paymentMethod: "MONOBANK_CARD",
+      paymentMethod: "DEFAULT",
       step: 0.01,
       minPrice: 45.5,
       maxPrice: 55.0,
@@ -361,36 +345,6 @@ bot.callbackQuery(/^toggle_side:(\d+)$/, async (ctx) => {
   await showRuleCard(ctx, ruleId, true);
 });
 
-bot.callbackQuery(/^menu_bank:(\d+)$/, async (ctx) => {
-  await ctx.answerCallbackQuery();
-  const ruleId = Number(ctx.match[1]);
-  const rule = await prisma.adRule.findUnique({ where: { id: ruleId } });
-  if (!rule) return;
-
-  const kb = new InlineKeyboard();
-  for (const [code, label] of Object.entries(PAYMENT_METHODS)) {
-    const mark = rule.paymentMethod === code ? "✅ " : "";
-    kb.text(`${mark}${label}`, `set_bank:${ruleId}:${code}`).row();
-  }
-  kb.text("⬅️ Назад к объявлению", `rule:${ruleId}`);
-
-  await ctx.editMessageText("💳 <b>Выберите способ оплаты (банк / IBAN):</b>", {
-    parse_mode: "HTML",
-    reply_markup: kb,
-  });
-});
-
-bot.callbackQuery(/^set_bank:(\d+):(.+)$/, async (ctx) => {
-  const ruleId = Number(ctx.match[1]);
-  const bankCode = ctx.match[2];
-  await prisma.adRule.update({
-    where: { id: ruleId },
-    data: { paymentMethod: bankCode },
-  });
-  await ctx.answerCallbackQuery("✅ Способ оплаты обновлен");
-  await showRuleCard(ctx, ruleId, true);
-});
-
 bot.callbackQuery(/^toggle_all_comp:(\d+)$/, async (ctx) => {
   const ruleId = Number(ctx.match[1]);
   const rule = await prisma.adRule.findUnique({ where: { id: ruleId } });
@@ -402,7 +356,7 @@ bot.callbackQuery(/^toggle_all_comp:(\d+)$/, async (ctx) => {
   });
   await ctx.answerCallbackQuery(
     !rule.matchAllCompetitors
-      ? "✅ Теперь перебиваются все объявления выбранного банка"
+      ? "✅ Теперь перебиваются все объявления стакана"
       : "✅ Снова учитываются только выбранные ники",
   );
   await showRuleCard(ctx, ruleId, true);
@@ -521,7 +475,6 @@ bot.callbackQuery(/^select_comp_ads:(\d+):(\d+)$/, async (ctx) => {
 
   await ctx.answerCallbackQuery({ text: `Загружаю объявления ${exchangeName}...` });
 
-  // Получаем стакан без фильтра банков, чтобы увидеть все доступные объявления этого ника
   const orders = await adapter.fetchOrderBook({
     asset: rule.asset as "USDT" | "USDC",
     fiat: rule.fiat,
