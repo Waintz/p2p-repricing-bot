@@ -10,6 +10,8 @@ export interface OkxMyAd {
   fiat: string;
   side: "BUY" | "SELL";
   price: number;
+  minOrderLimit?: string;
+  maxOrderLimit?: string;
 }
 
 function normalizeNick(nick: string): string {
@@ -160,6 +162,13 @@ export class OkxAdapter implements IExchangeAdapter {
         fiat: String(ad.fiatCurrency || "UAH").toUpperCase(),
         side: String(ad.side).toUpperCase() as "BUY" | "SELL",
         price: parseFloat(ad.unitPrice || ad.price || "0"),
+        // 🎯 Читаем точные поля согласно документации OKX API V5
+        minOrderLimit: ad.minOrderSize ? String(ad.minOrderSize) : undefined,
+        maxOrderLimit: ad.maxOrderSize
+          ? String(ad.maxOrderSize)
+          : ad.realFiatMaxAmountPerOrder
+            ? String(ad.realFiatMaxAmountPerOrder)
+            : undefined,
       }));
     } catch (err: any) {
       console.warn(
@@ -183,17 +192,27 @@ export class OkxAdapter implements IExchangeAdapter {
     }
 
     try {
+      // Подтягиваем текущее объявление, чтобы взялись реальные minOrderSize и maxOrderSize с биржи
+      const myAds = await this.fetchMyAds();
+      const currentAd = myAds.find((a) => a.id === adId);
+
       const method = "POST";
       const requestPath = "/api/v5/p2p/ad/update";
       const timestamp = new Date().toISOString();
 
-      const bodyStr = JSON.stringify({
+      const payload: Record<string, any> = {
         adId,
         unitPrice: newPrice.toFixed(2),
-        minOrderLimit: "10000.00",
-        maxOrderLimit: "2500000.00",
-      });
+      };
 
+      if (currentAd?.minOrderLimit) {
+        payload.minOrderLimit = currentAd.minOrderLimit;
+      }
+      if (currentAd?.maxOrderLimit) {
+        payload.maxOrderLimit = currentAd.maxOrderLimit;
+      }
+
+      const bodyStr = JSON.stringify(payload);
       const sign = this.sign(timestamp, method, requestPath, bodyStr);
 
       const response = await axios.post(
