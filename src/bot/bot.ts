@@ -4,9 +4,11 @@ import { prisma } from "../database/prisma";
 import { EXCHANGES, PAY_TIMES } from "../config/constants";
 import { BybitAdapter } from "../exchanges/bybit.adapter";
 import { BinanceAdapter } from "../exchanges/binance.adapter";
+import { OkxAdapter } from "../exchanges/okx.adapter";
 
 const bybitAdapter = new BybitAdapter();
 const binanceAdapter = new BinanceAdapter();
+const okxAdapter = new OkxAdapter();
 
 interface SessionData {
   awaitingInput?: {
@@ -166,6 +168,8 @@ export async function showRuleCard(
       `📋 Выбрать ордер из Binance`,
       `fetch_binance_ads:${rule.id}`,
     ).row();
+  } else if (rule.exchange === "OKX") {
+    kb.text(`📋 Выбрать ордер из OKX`, `fetch_okx_ads:${rule.id}`).row();
   }
 
   kb.text(`🆔 Ввести ID вручную`, `ask_input:AD_ID:${rule.id}`)
@@ -238,6 +242,35 @@ bot.callbackQuery(/^fetch_binance_ads:(\d+)$/, async (ctx) => {
 
   await ctx.editMessageText(
     "📋 <b>Выберите объявление из Binance:</b>\n\nНажмите на нужный ордер для привязки:",
+    { parse_mode: "HTML", reply_markup: kb },
+  );
+});
+
+bot.callbackQuery(/^fetch_okx_ads:(\d+)$/, async (ctx) => {
+  const ruleId = Number(ctx.match[1]);
+  await ctx.answerCallbackQuery({ text: "Загружаю объявления из OKX..." });
+
+  const ads = await okxAdapter.fetchMyAds();
+
+  if (ads.length === 0) {
+    await ctx.reply(
+      "⚠️ Объявления не найдены или не указаны / неверны API-ключи OKX в .env.",
+    );
+    return;
+  }
+
+  const kb = new InlineKeyboard();
+  for (const ad of ads) {
+    const sideText = ad.side === "SELL" ? "ПРОДАЖА" : "ПОКУПКА";
+    kb.text(
+      `#${ad.id.slice(-6)} | ${sideText} | ${ad.asset} | ${ad.price} UAH`,
+      `set_ad_id:${ruleId}:${ad.id}`,
+    ).row();
+  }
+  kb.text("⬅️ Назад к карточке", `rule:${ruleId}`);
+
+  await ctx.editMessageText(
+    "📋 <b>Выберите объявление из вашего аккаунта OKX:</b>\n\nНажмите на нужный ордер для привязки:",
     { parse_mode: "HTML", reply_markup: kb },
   );
 });
@@ -471,9 +504,20 @@ bot.callbackQuery(/^select_comp_ads:(\d+):(\d+)$/, async (ctx) => {
   }
 
   const exchangeName = rule.exchange.toUpperCase();
-  const adapter = exchangeName === "BINANCE" ? binanceAdapter : bybitAdapter;
 
-  await ctx.answerCallbackQuery({ text: `Загружаю объявления ${exchangeName}...` });
+  // ✅ ИСПРАВЛЕННЫЙ ВЫБОР АДАПТЕРА
+  let adapter;
+  if (exchangeName === "BINANCE") {
+    adapter = binanceAdapter;
+  } else if (exchangeName === "OKX") {
+    adapter = okxAdapter; // 👈 Теперь корректно вызывается OKX
+  } else {
+    adapter = bybitAdapter;
+  }
+
+  await ctx.answerCallbackQuery({
+    text: `Загружаю объявления ${exchangeName}...`,
+  });
 
   const orders = await adapter.fetchOrderBook({
     asset: rule.asset as "USDT" | "USDC",
@@ -488,16 +532,19 @@ bot.callbackQuery(/^select_comp_ads:(\d+):(\d+)$/, async (ctx) => {
   const matchingOrders = orders
     .filter((order) => {
       const sameNick =
-        order.nickName.trim().toLowerCase() === comp.nickname.trim().toLowerCase();
+        order.nickName.trim().toLowerCase() ===
+        comp.nickname.trim().toLowerCase();
       const inRange =
         order.price >= rule.minPrice && order.price <= rule.maxPrice;
       return sameNick && inRange;
     })
-    .sort((a, b) => (rule.side === "BUY" ? b.price - a.price : a.price - b.price));
+    .sort((a, b) =>
+      rule.side === "BUY" ? b.price - a.price : a.price - b.price,
+    );
 
   if (matchingOrders.length === 0) {
     await ctx.reply(
-      `⚠️ Активных объявлений конкурента [${comp.nickname}] на ${exchangeName} в диапазоне ${rule.minPrice.toFixed(2)}–${rule.maxPrice.toFixed(2)} не найдено в стакане.`
+      `⚠️ Активных объявлений конкурента [${comp.nickname}] на ${exchangeName} в диапазоне ${rule.minPrice.toFixed(2)}–${rule.maxPrice.toFixed(2)} не найдено в стакане.`,
     );
     return;
   }
@@ -507,7 +554,7 @@ bot.callbackQuery(/^select_comp_ads:(\d+):(\d+)$/, async (ctx) => {
     const selected = selectedOrderIds.includes(order.orderId);
     kb.text(
       `${selected ? "✅" : "⬜"} ${order.price.toFixed(2)} | #${order.orderId.slice(-8)} | ${order.payTime} мин`,
-      `toggle_comp_ad:${comp.id}:${ruleId}:${order.orderId}`
+      `toggle_comp_ad:${comp.id}:${ruleId}:${order.orderId}`,
     ).row();
   }
   kb.text("⬅️ Назад к конкурентам", `menu_comp:${ruleId}`);
@@ -516,7 +563,7 @@ bot.callbackQuery(/^select_comp_ads:(\d+):(\d+)$/, async (ctx) => {
     `📋 <b>Объявления ${comp.nickname} (${exchangeName})</b>\n` +
       `Диапазон: <b>${rule.minPrice.toFixed(2)}–${rule.maxPrice.toFixed(2)} UAH</b>\n` +
       `Выберите объявления, за которыми нужно следить:`,
-    { parse_mode: "HTML", reply_markup: kb }
+    { parse_mode: "HTML", reply_markup: kb },
   );
 });
 

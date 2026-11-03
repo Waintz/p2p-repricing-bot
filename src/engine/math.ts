@@ -102,13 +102,13 @@ export function calculateNewPrice(
     // Проверяем фильтр по времени оплаты
     if (
       rule.allowedPayTimes.length > 0 &&
+      order.payTime !== 0 &&
       !rule.allowedPayTimes.includes(order.payTime)
     ) {
       continue;
     }
 
-    // Если ордер выходит за рамки коридора — просто пропускаем ЭТО конкретное объявление
-    // (не блокируя остальные объявления этого же конкурента!)
+    // Проверка выхода цены за коридор
     if (rule.side === "BUY" && order.price > rule.maxPrice) {
       continue;
     }

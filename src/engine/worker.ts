@@ -3,6 +3,7 @@ import { calculateNewPrice, RuleConfig, MarketOrder } from "./math";
 import { BybitAdapter } from "../exchanges/bybit.adapter";
 import { BinanceAdapter } from "../exchanges/binance.adapter";
 import { IExchangeAdapter } from "../exchanges/exchange.interface";
+import { OkxAdapter } from "../exchanges/okx.adapter";
 
 type Coolable = IExchangeAdapter & {
   isAdCoolingDown?: (adId: string) => boolean;
@@ -16,6 +17,7 @@ export class RepricingWorker {
   private adapters: Record<string, IExchangeAdapter> = {
     BYBIT: new BybitAdapter(),
     BINANCE: new BinanceAdapter(),
+    OKX: new OkxAdapter(),
   };
 
   public start(intervalMs = 15000) {
@@ -87,11 +89,15 @@ export class RepricingWorker {
 
     for (const rule of rules) {
       if (!rule.adId) {
-        console.warn(`⚠️ [${rule.exchange}] Правило "${rule.name}" включено, но не привязан ID ордера (adId пустой)`);
+        console.warn(
+          `⚠️ [${rule.exchange}] Правило "${rule.name}" включено, но не привязан ID ордера (adId пустой)`,
+        );
         continue;
       }
       if (adapter.isAdCoolingDown?.(String(rule.adId))) {
-        console.log(`⏳ [${rule.exchange}] Ордер #${rule.adId} на кулдауне, пропуск.`);
+        console.log(
+          `⏳ [${rule.exchange}] Ордер #${rule.adId} на кулдауне, пропуск.`,
+        );
         continue;
       }
 
@@ -120,30 +126,35 @@ export class RepricingWorker {
         }
 
         if (!orderBook || orderBook.length === 0) {
-          console.warn(`⚠️ [${rule.exchange}] Стакан для "${rule.name}" пуст или не загружен`);
+          console.warn(
+            `⚠️ [${rule.exchange}] Стакан для "${rule.name}" пуст или не загружен`,
+          );
           continue;
         }
 
-        // Синхронизация рассинхрона: находим наше объявление прямо в полученном стакане
+        // Поиск нашего объявления в стакане по актуальному ID ордера
         const myOrderInBook = orderBook.find(
-          (o) => String(o.orderId).trim() === String(rule.adId).trim()
+          (o) => String(o.orderId).trim() === String(rule.adId).trim(),
         );
 
-        let actualExchangePrice = rule.currentPrice ? Number(rule.currentPrice) : null;
+        let actualExchangePrice = rule.currentPrice
+          ? Number(rule.currentPrice)
+          : null;
 
         if (myOrderInBook && Number.isFinite(myOrderInBook.price)) {
           actualExchangePrice = Number(myOrderInBook.price);
-          
-          // Если реальная цена на бирже отличается от записанной в базе, обновляем БД
+
           if (
             rule.currentPrice === null ||
-            Math.round(Number(rule.currentPrice) * 100) !== Math.round(actualExchangePrice * 100)
+            Math.round(Number(rule.currentPrice) * 100) !==
+              Math.round(actualExchangePrice * 100)
           ) {
             console.log(
-              `🔄 [${rule.exchange} | ${rule.name}] Обнаружен рассинхрон! В БД: ${
+              `🔄 [${rule.exchange} | ${rule.name}] Рассинхрон! В БД: ${
                 rule.currentPrice ?? "—"
-              }, На бирже: ${actualExchangePrice.toFixed(2)} UAH. Обновляем БД.`
+              }, На бирже: ${actualExchangePrice.toFixed(2)} UAH. Обновляем БД.`,
             );
+            rule.currentPrice = actualExchangePrice;
             await prisma.adRule.update({
               where: { id: rule.id },
               data: { currentPrice: actualExchangePrice },
@@ -151,9 +162,11 @@ export class RepricingWorker {
           }
         }
 
-        const allowedPayTimes: number[] = JSON.parse(
-          rule.allowedPayTimes || "[15,30,45,60]"
-        );
+        // Для OKX разрешаем любое время оплаты, для других бирж читаем из базы
+        const allowedPayTimes: number[] =
+          rule.exchange === "OKX"
+            ? []
+            : JSON.parse(rule.allowedPayTimes || "[5,15,30,45,60]");
 
         const mathConfig: RuleConfig = {
           side: rule.side as "BUY" | "SELL",
@@ -173,42 +186,84 @@ export class RepricingWorker {
         };
 
         const result = calculateNewPrice(orderBook, mathConfig);
-        const safeTargetPrice = this.applyBinanceSafetyLimit(rules, rule, result.targetPrice);
+        const safeTargetPrice = this.applyBinanceSafetyLimit(
+          rules,
+          rule,
+          result.targetPrice,
+        );
 
         if (safeTargetPrice === null) continue;
 
-        // Сравниваем актуальную цену с биржи с новой целевой ценой
         if (
           actualExchangePrice !== null &&
           Number.isFinite(actualExchangePrice) &&
-          Math.round(actualExchangePrice * 100) === Math.round(safeTargetPrice * 100)
+          Math.round(actualExchangePrice * 100) ===
+            Math.round(safeTargetPrice * 100)
         ) {
           console.log(
-            `⏸️ [${rule.exchange} | ${rule.name}] Цена актуальна: ${actualExchangePrice.toFixed(2)} UAH (${result.reason})`
+            `⏸️ [${rule.exchange} | ${rule.name}] Цена актуальна: ${actualExchangePrice.toFixed(2)} UAH (${result.reason})`,
           );
           continue;
         }
 
         console.log(
-          `🔄 [${rule.exchange} | ${rule.name}] ${actualExchangePrice ? actualExchangePrice.toFixed(2) : "—"} -> ${safeTargetPrice.toFixed(2)} UAH (${result.reason})`
+          `🔄 [${rule.exchange} | ${rule.name}] ${actualExchangePrice ? actualExchangePrice.toFixed(2) : "—"} -> ${safeTargetPrice.toFixed(2)} UAH (${result.reason})`,
         );
 
-        const updated = await adapter.updateAdPrice(String(rule.adId), safeTargetPrice);
+        const updated = await adapter.updateAdPrice(
+          String(rule.adId),
+          safeTargetPrice,
+        );
 
         if (updated) {
+          const newAdId = this.extractOkxNewAdId(adapter, String(rule.adId));
+
+          rule.currentPrice = safeTargetPrice;
+          if (newAdId) {
+            rule.adId = newAdId;
+          }
+
           await prisma.adRule.update({
             where: { id: rule.id },
-            data: { currentPrice: safeTargetPrice },
+            data: {
+              currentPrice: safeTargetPrice,
+              ...(newAdId ? { adId: newAdId } : {}),
+            },
           });
         }
       } catch (error: any) {
-        console.error(`❌ [${rule.exchange}] Ошибка ордера ${rule.name}:`, error?.message ?? error);
+        console.error(
+          `❌ [${rule.exchange}] Ошибка ордера ${rule.name}:`,
+          error?.message ?? error,
+        );
       }
     }
   }
 
-  private applyBinanceSafetyLimit(rules: any[], rule: any, targetPrice: number): number | null {
-    if (rule.exchange !== "BINANCE" || rule.asset !== "USDT" || !Number.isFinite(targetPrice)) {
+  private extractOkxNewAdId(
+    adapter: IExchangeAdapter,
+    currentAdId: string,
+  ): string | undefined {
+    if (adapter instanceof OkxAdapter) {
+      const newAdId = adapter.lastNewAdIds.get(currentAdId);
+      if (newAdId) {
+        adapter.lastNewAdIds.delete(currentAdId);
+        return newAdId;
+      }
+    }
+    return undefined;
+  }
+
+  private applyBinanceSafetyLimit(
+    rules: any[],
+    rule: any,
+    targetPrice: number,
+  ): number | null {
+    if (
+      rule.exchange !== "BINANCE" ||
+      rule.asset !== "USDT" ||
+      !Number.isFinite(targetPrice)
+    ) {
       return targetPrice;
     }
 
@@ -220,16 +275,20 @@ export class RepricingWorker {
         c.fiat === rule.fiat &&
         c.side === rule.side &&
         c.paymentMethod === rule.paymentMethod &&
-        c.currentPrice
+        c.currentPrice,
     );
 
-    const violating = related.find((c) => Math.abs(targetPrice / Number(c.currentPrice) - 1) > 0.005);
+    const violating = related.find(
+      (c) => Math.abs(targetPrice / Number(c.currentPrice) - 1) > 0.005,
+    );
     if (!violating) return targetPrice;
 
     const conflictKey = `${rule.id}|${targetPrice.toFixed(2)}|${violating.id}`;
     if (!this.warnedSafetyConflicts.has(conflictKey)) {
       this.warnedSafetyConflicts.add(conflictKey);
-      console.warn(`🛑 [BINANCE] Ордер "${rule.name}" (${targetPrice.toFixed(2)}) конфликтует с "${violating.name}" (>0.5%).`);
+      console.warn(
+        `🛑 [BINANCE] Ордер "${rule.name}" (${targetPrice.toFixed(2)}) конфликтует с "${violating.name}" (>0.5%).`,
+      );
     }
     return null;
   }
